@@ -1,0 +1,35 @@
+# ============ Python ============
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# ============ 大文件 / 可重新生成：绝不进仓库 ============
+runs/
+data/
+_downloads/
+models/*.pt
+models/*.onnx
+models/*.rknn
+models/*.engine
+*.db
+*.db-journal
+
+# ============ 图片：默认忽略，只保留报告配图 ============
+*.jpg
+*.jpeg
+*.png
+!reports/figures/*.png
+
+# ============ 本地配置与密钥 ============
+.env
+*.local
+secrets/
+
+# ============ 编辑器 / 系统 ============
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.log

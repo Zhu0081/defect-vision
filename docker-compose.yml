@@ -1,0 +1,49 @@
+# 一条命令起整套：数据库 + 应用
+#
+#   docker compose up -d --build     启动（-d 后台）
+#   docker compose logs -f app       看应用日志
+#   docker compose ps                看状态与健康
+#   docker compose down              停掉（数据卷保留）
+#   docker compose down -v           停掉并删库（慎用）
+#
+# 打开 http://127.0.0.1:8010/
+
+services:
+  db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: defect
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d defect"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    # 不对外暴露 5432，避免和本机自己装的 PostgreSQL 抢端口
+
+  app:
+    build: .
+    ports:
+      # 宿主 8010 → 容器 8000（宿主 8000 已经被本机直接跑的服务占了）
+      - "8010:8000"
+    environment:
+      # 注意 host 写的是服务名 db，不是 localhost：
+      # 容器里的 localhost 指的是容器自己
+      DV_DATABASE_URL: postgresql+psycopg://postgres:postgres@db:5432/defect
+      DV_DEFAULT_CONF: "0.25"
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      # 上传的图放命名卷（不是宿主机目录）。
+      # 实测：往 Windows 目录 bind mount 写一张 2.8MB 图要 1219ms，
+      # 写命名卷只要 28ms —— Docker Desktop 的 9p/virtiofs 转发太慢。
+      - uploads:/app/data/uploads
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+  uploads:

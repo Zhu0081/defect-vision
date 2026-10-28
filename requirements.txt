@@ -1,0 +1,13 @@
+# 运行时依赖（W1 服务化阶段）
+fastapi>=0.115
+uvicorn>=0.30
+sqlalchemy>=2.0
+python-multipart>=0.0.9
+opencv-python>=4.10
+numpy>=1.26
+requests>=2.31
+
+# 训练/推理阶段才需要（现在不要装，装了会拖慢 pip）
+# ultralytics>=8.3
+# onnx>=1.17
+# onnxruntime>=1.20

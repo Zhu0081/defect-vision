@@ -1,0 +1,334 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>工业缺陷视觉检测 · 在线演示</title>
+<style>
+  :root{
+    --bg:#0f172a; --panel:#fff; --ink:#0f172a; --muted:#64748b;
+    --line:#e2e8f0; --accent:#0f766e; --ok:#15803d; --ng:#b91c1c; --warn:#b45309;
+  }
+  *{box-sizing:border-box}
+  body{
+    margin:0; background:#f1f5f9; color:var(--ink);
+    font-family:system-ui,-apple-system,"Segoe UI","Microsoft YaHei",sans-serif;
+    -webkit-font-smoothing:antialiased;
+  }
+  header{
+    background:var(--bg); color:#fff; padding:18px 22px;
+    display:flex; flex-wrap:wrap; align-items:center; gap:12px;
+  }
+  header h1{font-size:19px; margin:0; font-weight:650; letter-spacing:.3px}
+  header .sub{font-size:12.5px; color:#94a3b8}
+  header .spacer{flex:1}
+  .chip{
+    font-size:12px; padding:5px 11px; border-radius:999px;
+    background:#1e293b; color:#cbd5e1; border:1px solid #334155; white-space:nowrap;
+  }
+  .chip.real{background:#052e2b; color:#5eead4; border-color:#0f766e}
+  .chip.mock{background:#3b1d0a; color:#fdba74; border-color:#b45309}
+
+  main{
+    max-width:1180px; margin:22px auto; padding:0 16px;
+    display:grid; grid-template-columns:minmax(0,1.15fr) minmax(0,1fr); gap:18px;
+  }
+  @media (max-width:860px){ main{grid-template-columns:1fr} }
+
+  .panel{background:var(--panel); border:1px solid var(--line); border-radius:14px; padding:18px}
+  .panel h2{font-size:14px; margin:0 0 12px; color:var(--muted); font-weight:600; letter-spacing:.4px}
+
+  /* ---------- 上传 ---------- */
+  .drop{
+    border:2px dashed #cbd5e1; border-radius:12px; padding:38px 16px;
+    text-align:center; cursor:pointer; transition:.15s; background:#f8fafc;
+  }
+  .drop:hover,.drop.over{border-color:var(--accent); background:#f0fdfa}
+  .drop .big{font-size:15px; font-weight:600; color:#334155}
+  .drop .hint{font-size:12.5px; color:var(--muted); margin-top:6px}
+
+  /* frame 收缩到图片本身的大小，overlay 才能和图片严格对齐（百分比定位不会偏） */
+  .stage{margin-top:14px; border-radius:12px; background:#0b1220; padding:6px; text-align:center}
+  .frame{position:relative; display:inline-block; max-width:100%; line-height:0}
+  .frame img{display:block; max-width:100%; max-height:58vh; margin:0 auto}
+  .overlay{position:absolute; inset:0}
+  .box{
+    position:absolute; border:2px solid #22d3ee;
+    box-shadow:0 0 0 1px rgba(0,0,0,.45) inset;
+    border-radius:3px; pointer-events:none;
+  }
+  .box b{
+    position:absolute; top:-21px; left:-2px; font-size:11px; line-height:17px;
+    padding:0 6px; border-radius:4px 4px 4px 0; background:#22d3ee; color:#082f49;
+    font-weight:700; white-space:nowrap;
+  }
+
+  .params{display:flex; flex-wrap:wrap; gap:10px; margin:14px 0}
+  .params label{font-size:12.5px; color:var(--muted); display:flex; align-items:center; gap:6px}
+  .params input{
+    width:86px; padding:7px 9px; border:1px solid var(--line); border-radius:8px;
+    font:inherit; font-size:13px; color:var(--ink);
+  }
+  button{
+    width:100%; padding:11px 18px; border:0; border-radius:10px;
+    background:var(--accent); color:#fff; font-size:15px; font-weight:600; cursor:pointer;
+    transition:.15s;
+  }
+  button:hover:not(:disabled){background:#115e59}
+  button:disabled{background:#94a3b8; cursor:not-allowed}
+  .msg{margin-top:10px; font-size:13px; color:var(--muted); min-height:18px}
+  .msg.err{color:var(--ng)}
+
+  /* ---------- 结果 ---------- */
+  .verdict{
+    font-size:26px; font-weight:800; letter-spacing:1px; text-align:center;
+    padding:16px; border-radius:12px; margin-bottom:14px; background:#f1f5f9; color:#94a3b8;
+  }
+  .verdict.ok{background:#dcfce7; color:var(--ok)}
+  .verdict.ng{background:#fee2e2; color:var(--ng)}
+  .verdict small{display:block; font-size:12px; font-weight:500; letter-spacing:0; margin-top:4px; opacity:.8}
+
+  .stats{display:grid; grid-template-columns:repeat(4,1fr); gap:8px; margin-bottom:14px}
+  @media (max-width:560px){ .stats{grid-template-columns:repeat(2,1fr)} }
+  .stat{background:#f8fafc; border:1px solid var(--line); border-radius:10px; padding:10px 8px; text-align:center}
+  .stat b{display:block; font-size:17px; font-weight:700; font-variant-numeric:tabular-nums}
+  .stat span{font-size:11.5px; color:var(--muted)}
+
+  table{width:100%; border-collapse:collapse; font-size:13px}
+  th,td{text-align:left; padding:7px 6px; border-bottom:1px solid #f1f5f9}
+  th{font-size:11.5px; color:var(--muted); font-weight:600; text-transform:uppercase; letter-spacing:.4px}
+  td.num{font-variant-numeric:tabular-nums; text-align:right}
+  .empty{color:var(--muted); font-size:13px; padding:10px 2px}
+
+  details{margin-top:14px}
+  summary{font-size:12.5px; color:var(--muted); cursor:pointer}
+  pre{
+    background:#0f172a; color:#cbd5e1; padding:12px; border-radius:10px;
+    font-size:12px; overflow:auto; max-height:280px; margin:8px 0 0;
+  }
+
+  /* ---------- 历史 ---------- */
+  .history{max-width:1180px; margin:0 auto 40px; padding:0 16px}
+  .hist{display:grid; grid-template-columns:repeat(auto-fill,minmax(150px,1fr)); gap:12px}
+  .card{
+    border:1px solid var(--line); border-radius:11px; overflow:hidden;
+    background:#fff; text-decoration:none; color:inherit; display:block;
+  }
+  .card img{width:100%; height:96px; object-fit:cover; background:#e2e8f0; display:block}
+  .card .meta{padding:8px 9px; font-size:11.5px; color:var(--muted); line-height:1.5}
+  .card .meta b{display:block; font-size:13px; margin-bottom:2px}
+  .card .meta b.ok{color:var(--ok)}
+  .card .meta b.ng{color:var(--ng)}
+</style>
+</head>
+<body>
+
+<header>
+  <div>
+    <h1>工业表面缺陷检测 · 在线演示</h1>
+    <div class="sub">YOLO11n-seg → ONNX Runtime CPU → FastAPI → PostgreSQL</div>
+  </div>
+  <div class="spacer"></div>
+  <div id="chip" class="chip">连接中…</div>
+</header>
+
+<main>
+  <!-- 左：上传 -->
+  <section class="panel">
+    <h2>第一步 · 选择图片</h2>
+    <div id="drop" class="drop">
+      <div class="big">拖图片到这里，或点击选择</div>
+      <div class="hint">jpg / png，单张 ≤ 10 MB</div>
+    </div>
+    <input id="file" type="file" accept="image/*" hidden>
+
+    <div id="stage" class="stage" style="display:none">
+      <div class="frame">
+        <img id="preview" alt="预览">
+        <div id="overlay" class="overlay"></div>
+      </div>
+    </div>
+
+    <div class="params">
+      <label>光源<input id="light" value="side" maxlength="8"></label>
+      <label>件号<input id="part" value="001" maxlength="8"></label>
+      <label>阈值<input id="conf" type="number" step="0.05" min="0" max="1" value="0.25"></label>
+    </div>
+
+    <button id="go" disabled>开始检测</button>
+    <div id="msg" class="msg">还没有选择图片</div>
+  </section>
+
+  <!-- 右：结果 -->
+  <section class="panel">
+    <h2>第二步 · 检测结果</h2>
+    <div id="verdict" class="verdict">等待检测</div>
+
+    <div class="stats">
+      <div class="stat"><b id="s-n">–</b><span>缺陷数</span></div>
+      <div class="stat"><b id="s-max">–</b><span>最高置信度</span></div>
+      <div class="stat"><b id="s-ms">–</b><span>耗时 ms</span></div>
+      <div class="stat"><b id="s-model">–</b><span>模型</span></div>
+    </div>
+
+    <div id="items-wrap">
+      <div class="empty">检测后这里会列出每个缺陷的位置和置信度</div>
+    </div>
+
+    <details>
+      <summary>查看原始 JSON</summary>
+      <pre id="json">—</pre>
+    </details>
+  </section>
+</main>
+
+<section class="history">
+  <h2 style="font-size:14px;color:#64748b;margin:0 0 12px">最近检测记录</h2>
+  <div id="hist" class="hist"></div>
+</section>
+
+<script>
+const $ = id => document.getElementById(id);
+const LABELS = {scratch:"划痕", stain:"脏污", missing:"缺件", deform:"变形破损"};
+
+/* ---------- 健康检查 ---------- */
+async function loadHealth(){
+  try{
+    const j = await (await fetch('/health')).json();
+    const chip = $('chip');
+    chip.textContent = (j.is_mock ? '⚠ Mock 模型（结果是假的）' : '● 真模型 ' + j.model_name) + ' · ' + j.db;
+    chip.className = 'chip ' + (j.is_mock ? 'mock' : 'real');
+  }catch(e){
+    $('chip').textContent = '⚠ 服务未响应';
+    $('chip').className = 'chip mock';
+  }
+}
+loadHealth();
+
+/* ---------- 选图 ---------- */
+let picked = null;
+function setFile(f){
+  if(!f) return;
+  if(!f.type.startsWith('image/')){ $('msg').textContent = '请选择图片文件'; $('msg').className='msg err'; return; }
+  picked = f;
+  $('preview').src = URL.createObjectURL(f);
+  $('stage').style.display = 'block';
+  $('overlay').innerHTML = '';
+  $('go').disabled = false;
+  $('msg').className = 'msg';
+  $('msg').textContent = f.name + ' · ' + (f.size/1024).toFixed(0) + ' KB';
+}
+$('drop').onclick = () => $('file').click();
+$('file').onchange = e => setFile(e.target.files[0]);
+['dragenter','dragover'].forEach(ev => $('drop').addEventListener(ev, e => {
+  e.preventDefault(); $('drop').classList.add('over');
+}));
+['dragleave','drop'].forEach(ev => $('drop').addEventListener(ev, e => {
+  e.preventDefault(); $('drop').classList.remove('over');
+}));
+$('drop').addEventListener('drop', e => setFile(e.dataTransfer.files[0]));
+
+/* ---------- 检测 ---------- */
+$('go').onclick = async () => {
+  if(!picked) return;
+  const fd = new FormData();
+  fd.append('file', picked);
+  fd.append('light', $('light').value);
+  fd.append('part_id', $('part').value);
+  fd.append('conf', $('conf').value);
+
+  $('go').disabled = true;
+  $('msg').className = 'msg';
+  $('msg').textContent = '推理中……（CPU 约 0.2 秒）';
+
+  try{
+    const r = await fetch('/detect', {method:'POST', body:fd});
+    const j = await r.json();
+    if(!r.ok){
+      $('msg').className = 'msg err';
+      $('msg').textContent = 'HTTP ' + r.status + '：' + (j.detail || JSON.stringify(j));
+      $('go').disabled = false;
+      return;
+    }
+    render(j);
+    $('msg').textContent = '完成 · 编号 #' + j.inspection_id + ' · 批次 ' + j.batch_id;
+    loadHistory();
+  }catch(e){
+    $('msg').className = 'msg err';
+    $('msg').textContent = '请求失败：' + e;
+  }
+  $('go').disabled = false;
+};
+
+function render(j){
+  const v = $('verdict');
+  v.className = 'verdict ' + j.verdict;
+  v.innerHTML = (j.verdict === 'ok' ? 'OK 良品' : 'NG 不良')
+              + '<small>' + j.n_defects + ' 处缺陷 · 判定阈值 ' + (+$('conf').value).toFixed(2) + '</small>';
+
+  $('s-n').textContent     = j.n_defects;
+  $('s-max').textContent   = j.max_score ? j.max_score.toFixed(3) : '–';
+  $('s-ms').textContent    = j.latency_ms.toFixed(0);
+  $('s-model').textContent = j.is_mock ? 'Mock' : j.model_name.replace(/^onnx:/,'');
+
+  // 框
+  const ov = $('overlay');
+  ov.innerHTML = '';
+  j.items.forEach(d => {
+    const [x1,y1,x2,y2] = d.box;
+    const el = document.createElement('div');
+    el.className = 'box';
+    el.style.left   = (x1*100) + '%';
+    el.style.top    = (y1*100) + '%';
+    el.style.width  = ((x2-x1)*100) + '%';
+    el.style.height = ((y2-y1)*100) + '%';
+    el.innerHTML = '<b>' + (LABELS[d.label] || d.label) + ' ' + d.score.toFixed(2) + '</b>';
+    ov.appendChild(el);
+  });
+
+  // 明细表
+  const wrap = $('items-wrap');
+  if(!j.items.length){
+    wrap.innerHTML = '<div class="empty">没有检出缺陷 —— 判定为良品</div>';
+  }else{
+    wrap.innerHTML =
+      '<table><thead><tr><th>缺陷</th><th class="num">置信度</th><th class="num">位置 (x1,y1,x2,y2)</th></tr></thead><tbody>'
+      + j.items.map(d => '<tr><td>' + (LABELS[d.label] || d.label) + '</td>'
+          + '<td class="num">' + d.score.toFixed(3) + '</td>'
+          + '<td class="num" style="font-size:11.5px;color:#64748b">'
+          + d.box.map(x => x.toFixed(3)).join(', ') + '</td></tr>').join('')
+      + '</tbody></table>';
+  }
+  $('json').textContent = JSON.stringify(j, null, 2);
+}
+
+/* ---------- 历史 ---------- */
+async function loadHistory(){  try{
+    const rows = await (await fetch('/records?limit=8')).json();
+    const box = $('hist');
+    if(!rows.length){ box.innerHTML = '<div class="empty">还没有检测记录</div>'; return; }
+    box.innerHTML = rows.map(r =>
+      '<a class="card" href="/records/' + r.id + '" target="_blank">'
+      + '<img src="/image/' + r.id + '" loading="lazy" alt="">'
+      + '<div class="meta"><b class="' + (r.verdict || '') + '">'
+      + ((r.verdict === 'ok') ? 'OK 良品' : 'NG 不良') + ' · ' + (r.n_defects ?? 0) + ' 处</b>'
+      + '#' + r.id + ' · ' + (r.light || '—') + '<br>'
+      + (r.created_at ? String(r.created_at).slice(5,16).replace('T',' ') : '')
+      + '</div></a>').join('');
+  }catch(e){ /* 历史失败不影响主流程 */ }
+}
+/* ---------- 回放：?auto=16 打开就自动用第 16 条记录的图跑一遍 ---------- */
+async function replay(iid){
+  try{
+    const blob = await (await fetch('/image/' + iid)).blob();
+    setFile(new File([blob], 'replay_' + iid + '.jpg', {type:'image/jpeg'}));
+    $('go').click();
+  }catch(e){ $('msg').textContent = '回放失败：' + e; }
+}
+
+loadHistory();
+const auto = new URLSearchParams(location.search).get('auto');
+if(auto) setTimeout(() => replay(auto), 250);
+</script>
+</body>
+</html>

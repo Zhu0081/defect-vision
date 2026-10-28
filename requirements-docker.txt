@@ -1,0 +1,18 @@
+# 只给 Docker 镜像用的依赖（和 requirements.txt 的差别在 opencv）
+#
+# 为什么不用 opencv-python：
+#   普通版 opencv-python 链接了 libGL，在 slim 镜像里必须额外装 libgl1（几十 MB），
+#   而我们服务端根本不用 imshow / 窗口，只需要 imdecode / resize / imwrite。
+#   opencv-python-headless 就是为这种场景做的，不带 GUI 依赖，镜像更小。
+#
+# ⚠ 注意：采图脚本 src\capture\grab.py 用了 cv2.imshow，**不能**用 headless 版，
+#   所以那个依赖留在 requirements.txt 里，不进镜像。
+
+fastapi>=0.115
+uvicorn>=0.30
+sqlalchemy>=2.0
+python-multipart>=0.0.9
+opencv-python-headless>=4.10
+numpy>=1.26
+onnxruntime>=1.20
+psycopg[binary]>=3.2

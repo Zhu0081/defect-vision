@@ -1,0 +1,13 @@
+# 构建上下文里不要的东西（都不是镜像需要的，还能让 build 快几十倍）
+runs/
+data/
+reports/
+docs/
+_downloads/
+src/cpp/
+*.log
+*.md
+.git/
+__pycache__/
+*.pyc
+models/*.pt
