@@ -1,0 +1,20 @@
+[
+  {
+    "file": "best.onnx",
+    "size_mb": 11.22,
+    "p50_ms": 37.24,
+    "p95_ms": 48.54,
+    "mean_ms": 38.62,
+    "runs": 30,
+    "kind": "FP32"
+  },
+  {
+    "file": "best_int8_static.onnx",
+    "size_mb": 3.44,
+    "p50_ms": 25.4,
+    "p95_ms": 30.45,
+    "mean_ms": 25.84,
+    "runs": 30,
+    "kind": "INT8 静态"
+  }
+]
