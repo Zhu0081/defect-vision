@@ -18,6 +18,7 @@
 
 from __future__ import annotations
 
+import logging
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -26,13 +27,22 @@ from pathlib import Path
 
 import cv2
 import numpy as np
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
 
 from . import config, db, schemas
 from .detector import build_detector
+
+# 结构化日志：时间、级别、来源、消息。
+# 为什么不用 print：容器里排障时，print 没有时间戳也没有级别，
+# 出问题只能靠猜；logging 还能通过 DV_LOG_LEVEL 一行改成 DEBUG。
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)-5s %(name)s | %(message)s",
+)
+log = logging.getLogger("defect")
 
 # 前端是纯静态单页（一个 html + 内联 css/js），不需要 node/打包工具。
 # 放成独立文件而不是 python 字符串，改样式不用碰后端代码。
@@ -47,9 +57,12 @@ async def lifespan(app: FastAPI):
     config.UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
     app.state.detector = build_detector(config.MODEL_PATH, conf=config.DEFAULT_CONF)
     app.state.db_name = db_name
-    print(f"[startup] 数据库={db_name}  模型={app.state.detector.name}  mock={app.state.detector.is_mock}")
+    log.info(
+        "[startup] 数据库=%s 模型=%s mock=%s 上传目录=%s",
+        db_name, app.state.detector.name, app.state.detector.is_mock, config.UPLOAD_DIR,
+    )
     yield
-    print("[shutdown] bye")
+    log.info("[shutdown] bye")
 
 
 app = FastAPI(
@@ -84,6 +97,7 @@ def health() -> schemas.HealthResponse:
 
 @app.post("/detect", response_model=schemas.DetectResponse)
 async def detect(
+    request: Request,
     file: UploadFile = File(..., description="待检测图像（jpg/png）"),
     batch_id: str | None = Form(None, description="批次号，不传自动生成"),
     part_id: str | None = Form(None, description="工件件号"),
@@ -92,11 +106,33 @@ async def detect(
 ) -> schemas.DetectResponse:
     t0 = time.perf_counter()
 
-    raw = await file.read()
+    # 上传大小必须「边读边拦」，不能先 file.read() 再判断。
+    # 因为 read() 会把整个文件一次性读进内存：别人传 2GB，进程先吃掉 2GB 才回一个 413。
+    limit = config.MAX_UPLOAD_MB * 1024 * 1024
+    too_big = f"文件超过 {config.MAX_UPLOAD_MB} MB"
+
+    # 第一道闸：看请求头声明的大小（便宜，但客户端可以撒谎）
+    declared = request.headers.get("content-length")
+    if declared and declared.isdigit() and int(declared) > limit:
+        raise HTTPException(status_code=413, detail=too_big)
+
+    # 第二道闸：分块读，边读边累加（不信任请求头）
+    # 注意：Starlette 的 UploadFile 没有 .stream()，只有 await read(size)，
+    # 所以这里手动循环读 64KB 一块，读到空字节为止。
+    chunks: list[bytes] = []
+    size = 0
+    while True:
+        chunk = await file.read(64 * 1024)
+        if not chunk:
+            break
+        size += len(chunk)
+        if size > limit:
+            raise HTTPException(status_code=413, detail=too_big)
+        chunks.append(chunk)
+    raw = b"".join(chunks)
+
     if not raw:
         raise HTTPException(status_code=400, detail="空文件")
-    if len(raw) > config.MAX_UPLOAD_MB * 1024 * 1024:
-        raise HTTPException(status_code=413, detail=f"文件超过 {config.MAX_UPLOAD_MB} MB")
 
     img = cv2.imdecode(np.frombuffer(raw, np.uint8), cv2.IMREAD_COLOR)
     if img is None:
@@ -130,20 +166,40 @@ async def detect(
     # 只生成一次，落库和返回必须用同一个值（否则返回的批次号对不上库里的）
     bid = batch_id or f"B{datetime.now():%Y%m%d%H%M%S}"
 
-    iid = await run_in_threadpool(
-        db.save_inspection,
-        batch_id=bid,
-        filename=file.filename or name,
-        image_path=str(path.relative_to(config.BASE_DIR)).replace("\\", "/"),
-        part_id=part_id,
-        light=light,
-        model_name=det.name,
-        is_mock=det.is_mock,
-        verdict=verdict,
-        n_defects=len(items),
-        max_score=float(max_score),
-        latency_ms=latency_ms,
-        items=items,
+    # 落盘路径：能相对项目根就存相对路径（仓库搬家不失效），
+    # 上传目录被指到项目外面（比如挂了个外部卷）就存绝对路径。
+    # 以前这里直接 relative_to()，一旦 DV_UPLOAD_DIR 在项目外就抛 ValueError → 500。
+    try:
+        stored_path = str(path.relative_to(config.BASE_DIR)).replace("\\", "/")
+    except ValueError:
+        stored_path = str(path).replace("\\", "/")
+
+    try:
+        iid = await run_in_threadpool(
+            db.save_inspection,
+            batch_id=bid,
+            filename=file.filename or name,
+            image_path=stored_path,
+            part_id=part_id,
+            light=light,
+            model_name=det.name,
+            is_mock=det.is_mock,
+            verdict=verdict,
+            n_defects=len(items),
+            max_score=float(max_score),
+            latency_ms=latency_ms,
+            items=items,
+        )
+    except Exception:
+        # 图已经写进磁盘、库却没写成功 → 这会留下「孤儿文件」：
+        # 磁盘上有一张没人认领的图，越积越多。所以失败时把它删掉。
+        path.unlink(missing_ok=True)
+        log.exception("[detect] 落库失败，已删除刚写入的图片 %s", path)
+        raise HTTPException(status_code=500, detail="保存检测记录失败") from None
+
+    log.info(
+        "[detect] id=%s verdict=%s 缺陷=%d 耗时=%.1fms 模型=%s",
+        iid, verdict, len(items), latency_ms, det.name,
     )
 
     return schemas.DetectResponse(
@@ -170,7 +226,7 @@ def list_records(limit: int = 20) -> list[dict]:
     return db.list_inspections(limit=limit)
 
 
-@app.get("/records/{iid}")
+@app.get("/records/{iid}", response_model=schemas.RecordOut)
 def get_record(iid: int) -> dict:
     row = db.get_inspection(iid)
     if row is None:

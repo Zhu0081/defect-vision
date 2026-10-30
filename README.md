@@ -72,14 +72,28 @@ docker compose up -d --build
 
 等 15 秒，打开 **http://127.0.0.1:8010/**
 
+数据库密码等配置从 `.env` 读（不写死在 compose 文件里）。
+需要改的话：`Copy-Item .env.example .env` 然后编辑；**不建 `.env` 也能跑**，每项都有默认值。
+
 ### 方式二：本机直跑（开发调试用）
 
 ```powershell
-python -m pip install fastapi uvicorn onnxruntime opencv-python-headless numpy sqlalchemy psycopg[binary] python-multipart
+python -m pip install -r requirements.txt
 python -m uvicorn src.service.main:app --port 8000
 ```
 
 打开 **http://127.0.0.1:8000/**
+
+### 跑测试
+
+```powershell
+python -m pip install -r requirements-dev.txt
+python -m pytest tests -q
+```
+
+9 个用例，覆盖健康检查、页面、空文件 / 非图片 / 超大文件三种拒绝路径、落库后能查回来、404。
+**不依赖真模型**（没有 `models/best.onnx` 时自动退回 MockDetector），也不写脏你的真实数据
+（测试自己建临时目录和临时 SQLite）。
 
 ### 验证没吹牛
 
@@ -112,24 +126,37 @@ defect-vision/
 │   │   ├── prepare.py           # 按工件分组划分 7:2:1，生成 YOLO 目录结构
 │   │   └── check_labels.py      # 标注格式体检（类别号、点数、归一化范围）
 │   ├── train/train.py           # 训练 + 评估，逐类输出 mAP
-│   ├── eval/threshold_sweep.py  # 阈值扫描：漏检率/过杀率曲线
+│   ├── eval/
+│   │   ├── threshold_sweep.py   # 阈值扫描：漏检率/过杀率曲线
+│   │   └── quant_compare.py     # 量化前后逐图对比（框数/置信度/判定一致性）
+│   ├── deploy/quantize.py       # INT8 量化：动态 / 静态全算子 / 静态仅 Conv
 │   ├── service/
 │   │   ├── main.py              # FastAPI：/detect /records /report /health
 │   │   ├── detector.py          # ONNX Runtime 推理 + letterbox 预处理
 │   │   ├── db.py                # SQLAlchemy 模型 + 幂等迁移
 │   │   └── static/index.html    # 单文件前端，无构建
 │   └── cpp/                     # C++ 推理示例（规划中）
+├── tests/
+│   ├── conftest.py              # 临时库 + 临时上传目录 + 强制 Mock 模型
+│   └── test_api.py              # 9 个接口回归用例
 ├── data/yolo/data.yaml          # 数据集配置（由 prepare.py 生成）
 ├── docker-compose.yml           # 应用 + PostgreSQL 一键启动
 ├── Dockerfile
+├── .env.example                 # 配置模板（真实密码放 .env，不进 git）
+├── requirements.txt             # 运行时依赖
+├── requirements-dev.txt         # 仅开发/测试：pytest + httpx
+├── LICENSE                      # MIT
 ├── docs/
 │   ├── 运行手册.md              # 所有命令、报错速查、进度记录
 │   ├── 采集操作手册.md          # 怎么拍出能用的图
 │   ├── 标注规范.md              # 4 类缺陷的判定边界
 │   ├── 演示脚本.md              # 3 分钟演示分镜 + 追问应对
 │   ├── 简历与面试材料.md        # 简历三条 + 8 个数字 + 高频追问
-│   └── 错题本.md                # 23 条踩坑记录
+│   └── 错题本.md                # 42 条踩坑记录（按天编号，每条含现象/原因/解法）
 └── reports/                     # 指标、曲线、分析报告
+    ├── baseline_v1_分析.md      # 训练结果与失败归因
+    ├── 阈值扫描.md              # 漏检/过杀权衡曲线
+    └── 量化对比.md              # INT8 三种方案实测
 ```
 
 ---
@@ -189,6 +216,27 @@ YOLO 默认 `conf=0.25` 是给通用目标检测的。工业场景必须扫出�
 
 脚本技巧：**推理只跑一次**。先按 `conf=0.01` 取出所有框，记下每张图的最大置信度；之后 19 个阈值只是拿这个分数比大小。42 张 × 19 = 798 次推理变成 42 次。
 
+### 6. 上传大小「边读边拦」，不是读完再判断
+
+```python
+raw = await file.read()                    # ❌ 常见写法
+if len(raw) > LIMIT: raise 413
+```
+
+上面这段看着像做了限制，其实**没做**：`read()` 会先把整个文件读进内存，别人传 2 GB，进程先吃掉 2 GB 才回一个 413。
+
+正确做法是两道闸：先看 `Content-Length`（便宜但客户端会撒谎），再 64 KB 一块循环读、边读边累加，超了立刻停。
+
+### 7. 有回归测试，且不依赖真模型
+
+`tests/` 下 9 个 pytest 用例，覆盖健康检查、页面、三种拒绝路径（空文件 / 非图片 / 超大）、落库后能查回来、404。
+
+两个设计点：
+- **不依赖 `models/best.onnx`**：测试里把模型路径指到不存在的文件，服务自动退回 MockDetector —— 别人 clone 下来不用先下权重就能跑测试
+- **不写脏真实数据**：测试自己在临时目录建 SQLite 和上传目录
+
+写这批测试时抓到一个真 bug：`path.relative_to(BASE_DIR)` 在上传目录被指到项目外时会抛 `ValueError` → 500。这是纯靠读代码看不出来的。
+
 ---
 
 ## 已知限制
@@ -201,7 +249,7 @@ YOLO 默认 `conf=0.25` 是给通用目标检测的。工业场景必须扫出�
 | 只有一种光照（侧光） | 换光源模型大概率崩 | 补顶光/背光两组，做光源对比实验 |
 | 训练和测试用同一台手机 | 换设备有域偏移风险 | 换相机后重训，或做颜色归一化 |
 | 没做无监督异常检测 | 新缺陷类型要靠人工补标 | 加 PatchCore / EfficientAD 做兜底 |
-| 没做量化和边缘部署 | 只能在 CPU 上跑 180ms | ONNX INT8 量化 + RKNN，但当前机器无 NPU |
+| INT8 在这台机器不提速 | 静态量化 1.28×，仅 Conv 只有 1.23× | x86 无 VNNI 时量化收益有限，真收益在 ARM NPU |
 | 前端是单文件 HTML | 不能多人协作 | Vue/React + 构建流程 |
 
 ---
@@ -226,7 +274,7 @@ YOLO 默认 `conf=0.25` 是给通用目标检测的。工业场景必须扫出�
 - [ ] 数据补到 200 张、20 个工件，重训看 test 能否 > 0.5
 - [ ] 补顶光、背光两组，做「光源 × 模型」指标矩阵
 - [ ] 加无监督异常检测（PatchCore）作为未知缺陷兜底
-- [ ] ONNX INT8 量化，对比精度损失与加速比
+- [x] ONNX INT8 量化，对比精度损失与加速比（见 [量化对比](reports/量化对比.md)）
 - [ ] 用 PyAV 替换 `cv2.VideoCapture`，做 RTSP 实时检测（丢帧只留最新帧）
 
 ---
@@ -236,6 +284,7 @@ YOLO 默认 `conf=0.25` 是给通用目标检测的。工业场景必须扫出�
 - [标注意见与判定边界](docs/标注规范.md)
 - [采集操作手册](docs/采集操作手册.md)
 - [运行手册（所有命令在这里）](docs/运行手册.md)
-- [错题本（23 条踩坑记录）](docs/错题本.md)
+- [错题本（42 条踩坑记录）](docs/错题本.md)
 - [训练结果分析](reports/baseline_v1_分析.md)
 - [阈值扫描结论](reports/threshold_sweep.md)
+- [INT8 量化对比](reports/量化对比.md)
