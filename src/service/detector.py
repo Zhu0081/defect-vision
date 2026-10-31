@@ -13,6 +13,8 @@
 
 from __future__ import annotations
 
+import os
+
 import hashlib
 import random
 from dataclasses import dataclass
@@ -92,19 +94,20 @@ class OnnxDetector(BaseDetector):
             seg 模型：   [1, 300, 38]     x1,y1,x2,y2,score,class_id + 32 个 mask 系数
                          （本项目是 seg 模型，只取前 6 列；mask 系数暂时丢掉）
 
-        ⚠ 导出的框坐标是在 **letterbox 后的 640×640 画布上**（已实测），
+        ⚠ 导出的框坐标是在 **letterbox 后的 imgsz×imgsz 画布上**（已实测），
           不是原图像素 —— 所以下面的反 letterbox 是必需的，不能省。
 
     导出命令（Windows PowerShell，在项目根目录）：
         python -c "from ultralytics import YOLO; YOLO('runs/segment/baseline_v1/weights/best.pt')\
-            .export(format='onnx', imgsz=640, opset=12, simplify=True, nms=True, device='cpu')"
+            .export(format='onnx', imgsz=1280, opset=12, simplify=True, nms=True, device='cpu')"
 
     没装 onnxruntime、或模型文件不存在时，build_detector() 会回退到 MockDetector。
     """
 
     name = "onnx-cpu"
 
-    def __init__(self, model_path: Path, conf: float = 0.25, imgsz: int = 640) -> None:
+    def __init__(self, model_path: Path, conf: float = 0.25,
+                 imgsz: int = int(os.getenv("DV_IMGSZ", "1280"))) -> None:
         import onnxruntime as ort  # 延迟导入：没装也不影响其它功能
 
         self.conf = conf
@@ -172,7 +175,8 @@ class OnnxDetector(BaseDetector):
         return out
 
 
-def build_detector(model_path: Path, conf: float = 0.25) -> BaseDetector:
+def build_detector(model_path: Path, conf: float = 0.25,
+                   imgsz: int = int(os.getenv("DV_IMGSZ", "1280"))) -> BaseDetector:
     """优先用真模型；条件不满足就退回 Mock，并在控制台说清楚为什么。"""
     if not Path(model_path).exists():
         print(f"[detector] 没找到模型 {model_path}，先用 MockDetector（结果是假的）")

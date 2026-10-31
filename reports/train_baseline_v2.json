@@ -1,0 +1,19 @@
+{
+  "name": "baseline_v2",
+  "elapsed_min": 8.07,
+  "epochs": 30,
+  "imgsz": 640,
+  "batch": 4,
+  "n_train_images": null,
+  "timestamp": "2026-10-31T14:57:30",
+  "val_seg_map50": 0.15708333333333332,
+  "val_seg_map50_95": 0.03141666666666666,
+  "val_per_class": {
+    "scratch": 0.03141666666666666
+  },
+  "test_seg_map50": 0.0011142857142857144,
+  "test_seg_map50_95": 0.0006685714285714286,
+  "test_per_class": {
+    "deform": 0.0006685714285714286
+  }
+}

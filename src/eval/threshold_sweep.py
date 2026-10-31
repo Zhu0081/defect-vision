@@ -42,12 +42,17 @@ LABELS = ROOT / "data" / "yolo" / "labels"
 # 阈值网格：0.05 到 0.95，步长 0.05
 GRID = [round(0.05 * i, 2) for i in range(1, 20)]
 
+# 推理尺寸必须和训练尺寸一致。train.py 用的是多少，这里就得是多少：
+# 1280 训练 + 640 推理 = 把模型的「视力」直接砍一半，指标会假性暴跌。
+INFER_SIZE = 1280
+_INFER_SIZE = INFER_SIZE
+
 
 def collect(splits: list[str], conf_floor: float) -> list[dict]:
     """把所有图的「最大置信度」和真值一次取出来。"""
     from ultralytics import YOLO
 
-    model = load_model()
+    model = load_model(_FORCE_MODEL)
     items: list[dict] = []
 
     for sp in splits:
@@ -59,7 +64,8 @@ def collect(splits: list[str], conf_floor: float) -> list[dict]:
             gt = bool(lab.exists() and lab.read_text(encoding="utf-8", errors="ignore").strip())
 
             # conf 放到地板值，尽量把低分框也留下来，之后靠阈值筛
-            res = model.predict(str(img), conf=conf_floor, iou=0.5, imgsz=640, verbose=False)[0]
+            res = model.predict(str(img), conf=conf_floor, iou=0.5,
+                                imgsz=_INFER_SIZE, verbose=False)[0]
             confs = res.boxes.conf.cpu().numpy() if res.boxes is not None and len(res.boxes) else np.array([])
             items.append(
                 {
@@ -75,19 +81,20 @@ def collect(splits: list[str], conf_floor: float) -> list[dict]:
 
 
 _MODEL = None
+_MODEL_PATH = None
+_FORCE_MODEL: Path | None = None
 
 
-def load_model():
-    global _MODEL
-    if _MODEL is None:
-        import yaml
-
+def load_model(path: Path | None = None):
+    global _MODEL, _MODEL_PATH
+    path = path or (ROOT / "runs" / "segment" / "baseline_v1" / "weights" / "best.pt")
+    if _MODEL is None or _MODEL_PATH != path:
         from ultralytics import YOLO
 
-        weights = ROOT / "runs" / "segment" / "baseline_v1" / "weights" / "best.pt"
-        if not weights.exists():
-            sys.exit(f"找不到模型 {weights}\n先把 src/train/train.py 跑完")
-        _MODEL = YOLO(str(weights))
+        if not path.exists():
+            sys.exit(f"找不到模型 {path}\n先把 src/train/train.py 跑完")
+        _MODEL = YOLO(str(path))
+        _MODEL_PATH = path
     return _MODEL
 
 
@@ -168,8 +175,18 @@ def main() -> None:
     ap.add_argument("--splits", nargs="+", default=["val", "test"])
     ap.add_argument("--max-miss", type=float, default=5.0, help="漏检率上限 %%，默认 5")
     ap.add_argument("--conf-floor", type=float, default=0.01)
+    ap.add_argument("--imgsz", type=int, default=INFER_SIZE,
+                    help=f"推理尺寸，必须和训练一致，默认 {INFER_SIZE}")
     ap.add_argument("--tag", default="", help="输出文件名后缀，比如 val 只跑验证集时用 --tag _val")
+    ap.add_argument("--model", default="",
+                    help="权重路径，默认 runs/segment/baseline_v1/weights/best.pt")
     args = ap.parse_args()
+
+    global _FORCE_MODEL, _INFER_SIZE
+    if args.model:
+        _FORCE_MODEL = ROOT / args.model
+    _INFER_SIZE = args.imgsz
+    print(f"推理尺寸 {_INFER_SIZE}（必须等于训练尺寸）")
 
     tag = args.tag
     out_csv = ROOT / "reports" / f"threshold_sweep{tag}.csv"
