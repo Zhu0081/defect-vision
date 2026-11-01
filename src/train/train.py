@@ -46,6 +46,7 @@ def evaluate(weights: Path, imgsz: int, split: str, device: str) -> dict:
     """在指定 split 上跑一遍验证，返回关键指标。"""
     from ultralytics import YOLO
 
+    print(f"[评估] 权重={weights}  imgsz={imgsz}  split={split}  device={device}")
     model = YOLO(str(weights))
     m = model.val(data=str(DATA_YAML), imgsz=imgsz, split=split, device=device, verbose=False)
     out = {
