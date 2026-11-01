@@ -1,6 +1,6 @@
 # 工业表面缺陷检测 · 端到端 Demo
 
-用一台没有独显的笔记本，从零做一套能跑的工业视觉质检系统：
+用一台笔记本，从零做一套能跑的工业视觉质检系统（**训练与推理刻意只用 CPU**，对齐产线工控机）：
 **手机拍 → 标注 → 训练 → 导出 ONNX → FastAPI 服务 → PostgreSQL 落库 → 网页演示**。
 
 全部在 CPU 上跑通，不依赖 GPU、不依赖付费数据集、不需要开发板。
@@ -285,7 +285,7 @@ if len(raw) > LIMIT: raise 413
 | 服务 | FastAPI + Uvicorn |
 | 数据库 | PostgreSQL 17（inspection / defect_item，外键级联删除） |
 | 部署 | Docker + Docker Compose |
-| 环境 | Python 3.11 / Windows 11 / 20 核 CPU / 无独显 |
+| 环境 | Python 3.11 / Windows 11 / i5-13500HX 20 线程 / 本链路只用 CPU（机器另有 RTX 4060 8GB，未启用） |
 
 ---
 
