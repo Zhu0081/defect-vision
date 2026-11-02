@@ -25,6 +25,12 @@ services:
       timeout: 3s
       retries: 20
     # 不对外暴露 5432，避免和本机自己装的 PostgreSQL 抢端口
+    #
+    # restart 必须和 app 一致：Docker Desktop 开机自启时，
+    # 带 unless-stopped 的容器会自动起来，没写这个的不会。
+    # 只起 app 不起 db，app 就会报 failed to resolve host 'db' 并进入重启循环。
+    # depends_on 的 condition 只在 `compose up` 时生效，管不了"单独自动重启"。
+    restart: unless-stopped
 
   app:
     build: .
