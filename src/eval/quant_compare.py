@@ -23,7 +23,8 @@ import onnxruntime as ort
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 ROOT = Path(__file__).resolve().parents[2]
-IMGSZ = 640
+# 必须与导出 ONNX 时用的尺寸一致，否则两边比的不是同一个模型
+IMGSZ = 1280
 # ultralytics 导出带 NMS 的输出布局: [1, 300, 4框 + 1置信度 + 1类别 + 32掩码系数]
 COLS_BOX = slice(0, 4)
 COL_CONF = 4
@@ -64,6 +65,8 @@ def main() -> int:
     ap.add_argument("--int8", default=str(ROOT / "models" / "best_int8_static.onnx"))
     ap.add_argument("--splits", nargs="+", default=["val", "test"])
     ap.add_argument("--conf", type=float, default=0.05)
+    ap.add_argument("--imgsz", type=int, default=IMGSZ,
+                    help="推理尺寸，必须与导出 ONNX 时一致")
     args = ap.parse_args()
 
     fp32 = load(Path(args.fp32))
@@ -73,7 +76,7 @@ def main() -> int:
     for split in args.splits:
         for img_path in sorted((ROOT / "data" / "yolo" / "images" / split).glob("*.jpg")):
             img = cv2.imread(str(img_path))
-            x = letterbox(img)
+            x = letterbox(img, args.imgsz)
             n_f, c_f = infer(fp32, x, args.conf)
             n_q, c_q = infer(int8, x, args.conf)
             rows.append({
@@ -85,7 +88,7 @@ def main() -> int:
             })
 
     print("=" * 96)
-    print(f"  FP32 vs INT8 逐图对比   （判定阈值 {args.conf}）")
+    print(f"  FP32 vs INT8 逐图对比   （imgsz={args.imgsz}，判定阈值 {args.conf}）")
     print("=" * 96)
     print(f"  {'集':<6}{'文件':<32}{'FP32 检出/最高份':>20}{'INT8 检出/最高份':>20}{'判定':>8}")
     print("-" * 96)

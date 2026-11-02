@@ -99,10 +99,12 @@ def ensure_opset13(src: Path) -> Path:
         return src
 
     dst = src.with_name(src.stem + "_op13.onnx")
-    if not dst.exists():
-        conv = version_converter.convert_version(m, 13)
-        onnx.save(conv, str(dst))
-    print(f"  opset {cur} → 13：{dst.name}")
+    # 不能因为"文件已存在"就跳过：源模型换了（比如 640 换成 1280），
+    # 旧转换产物会静默留下来，calibration 时才会以
+    # "Got invalid dimensions ... Expected: 640" 的形式暴雷。
+    conv = version_converter.convert_version(m, 13)
+    onnx.save(conv, str(dst))
+    print(f"  opset {cur} → 13：{dst.name}（输入 {conv.graph.input[0].type.tensor_type.shape.dim[2].dim_value}）")
     return dst
 
 
@@ -193,7 +195,7 @@ def quantize_static_mode(src: Path, dst: Path, imgsz: int, calib: int,
 def main() -> int:
     ap = argparse.ArgumentParser(description="INT8 量化与延迟对比")
     ap.add_argument("--model", default=str(MODELS / "best.onnx"))
-    ap.add_argument("--mode", choices=["dynamic", "static", "bench-only", "all"], default="dynamic")
+    ap.add_argument("--mode", choices=["dynamic", "static", "convonly", "bench-only", "all"], default="dynamic")
     ap.add_argument("--imgsz", type=int, default=640)
     ap.add_argument("--calib", type=int, default=60, help="静态量化的校准图数量")
     ap.add_argument("--runs", type=int, default=30)
@@ -225,16 +227,19 @@ def main() -> int:
         results.append({**r, "kind": "INT8 动态"})
         print(f"  {r['size_mb']} MB  p50 {r['p50_ms']} ms")
 
-    if args.mode in ("static", "all"):
+    if args.mode in ("static", "convonly"):
+        only_conv = args.mode == "convonly"
+        title = "静态量化 · 只量化 Conv" if only_conv else "静态量化 (QDQ, 需校准)"
         print("\n" + "=" * 58)
-        print("  静态量化 (QDQ, 需校准)")
+        print(f"  {title}")
         print("=" * 58)
-        dst = OUT_DIR / "best_int8_static.onnx"
+        dst = OUT_DIR / ("best_int8_convonly.onnx" if only_conv else "best_int8_static.onnx")
         t0 = time.perf_counter()
-        quantize_static_mode(src, dst, args.imgsz, args.calib)
+        quantize_static_mode(src, dst, args.imgsz, args.calib,
+                             op_types=["Conv"] if only_conv else None)
         print(f"  生成 {dst.name}（{time.perf_counter() - t0:.1f} 秒）")
         r = bench(dst, args.imgsz, args.runs)
-        results.append({**r, "kind": "INT8 静态"})
+        results.append({**r, "kind": "INT8 仅Conv" if only_conv else "INT8 静态"})
         print(f"  {r['size_mb']} MB  p50 {r['p50_ms']} ms")
 
     if len(results) > 1:

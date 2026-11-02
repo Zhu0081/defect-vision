@@ -113,12 +113,20 @@ class OnnxDetector(BaseDetector):
         self.conf = conf
         self.imgsz = imgsz
         self.model_path = Path(model_path)
+        # 线程数是这台机器上最便宜的优化：默认用满 20 线程反而更慢。
+        # 实测 1280 输入 p50：1 线程 1062ms / 4 线程 402ms / 8 线程 265ms / 20 线程 385ms。
+        # 20 核里 8 个 P 核 + 12 个 E 核，线程开满后调度器把活分给慢核，同步等待成了瓶颈。
+        n_threads = int(os.getenv("DV_THREADS", "8"))
+        opts = ort.SessionOptions()
+        opts.intra_op_num_threads = n_threads
+        opts.inter_op_num_threads = 1
         self.session = ort.InferenceSession(
-            str(self.model_path), providers=["CPUExecutionProvider"]
+            str(self.model_path), opts, providers=["CPUExecutionProvider"]
         )
         inp = self.session.get_inputs()[0]
         self.input_name = inp.name
         self.name = f"onnx:{self.model_path.name}"
+        self.threads = n_threads
 
     # -- 预处理 ------------------------------------------------------
     def _letterbox(self, img: np.ndarray) -> tuple[np.ndarray, float, int, int]:

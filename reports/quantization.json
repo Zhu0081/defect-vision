@@ -1,20 +1,20 @@
 [
   {
     "file": "best.onnx",
-    "size_mb": 11.22,
-    "p50_ms": 37.24,
-    "p95_ms": 48.54,
-    "mean_ms": 38.62,
+    "size_mb": 11.7,
+    "p50_ms": 216.81,
+    "p95_ms": 335.69,
+    "mean_ms": 236.39,
     "runs": 30,
     "kind": "FP32"
   },
   {
-    "file": "best_int8_static.onnx",
-    "size_mb": 3.44,
-    "p50_ms": 25.4,
-    "p95_ms": 30.45,
-    "mean_ms": 25.84,
+    "file": "best_int8_convonly.onnx",
+    "size_mb": 3.91,
+    "p50_ms": 236.8,
+    "p95_ms": 343.28,
+    "mean_ms": 253.73,
     "runs": 30,
-    "kind": "INT8 静态"
+    "kind": "INT8 仅Conv"
   }
 ]
