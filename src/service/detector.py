@@ -40,7 +40,8 @@ class BaseDetector:
     def __init__(self, conf: float = 0.25) -> None:
         self.conf = conf
 
-    def predict(self, img: np.ndarray) -> list[Detection]:  # pragma: no cover
+    def predict(self, img: np.ndarray, conf: float | None = None) -> list[Detection]:  # pragma: no cover
+        """conf 为 None 时用构造时传入的默认值；否则按调用方给的阈值过滤。"""
         raise NotImplementedError
 
 
@@ -54,7 +55,7 @@ class MockDetector(BaseDetector):
     name = "mock-v0"
     is_mock = True
 
-    def predict(self, img: np.ndarray) -> list[Detection]:
+    def predict(self, img: np.ndarray, conf: float | None = None) -> list[Detection]:
         h, w = img.shape[:2]
         digest = hashlib.md5(np.ascontiguousarray(img).tobytes()).hexdigest()
         seed = int(digest[:12], 16)
@@ -71,7 +72,7 @@ class MockDetector(BaseDetector):
             x1 = rng.uniform(0.02, 0.98 - bw)
             y1 = rng.uniform(0.02, 0.98 - bh)
             score = round(rng.uniform(0.35, 0.93), 3)
-            if score < self.conf:
+            if score < (self.conf if conf is None else conf):
                 continue
             out.append(
                 Detection(
@@ -146,7 +147,8 @@ class OnnxDetector(BaseDetector):
         canvas[top : top + nh, left : left + nw] = resized
         return canvas, r, left, top
 
-    def predict(self, img: np.ndarray) -> list[Detection]:
+    def predict(self, img: np.ndarray, conf: float | None = None) -> list[Detection]:
+        thr = self.conf if conf is None else conf
         h, w = img.shape[:2]
         canvas, r, left, top = self._letterbox(img)
 
@@ -163,7 +165,7 @@ class OnnxDetector(BaseDetector):
             if row.shape[0] < 6:
                 continue
             x1, y1, x2, y2, score, cls = row[:6]
-            if float(score) < self.conf:
+            if float(score) < thr:
                 continue
             # 从 letterbox 坐标还原到原图，再归一化
             ox1 = max(0.0, (float(x1) - left) / r) / w

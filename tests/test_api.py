@@ -76,6 +76,34 @@ def test_detect_and_persist(client):
     assert got.json()["part_id"] == "001"
 
 
+def test_conf_threshold_takes_effect(client):
+    """回归测试：conf 必须真的影响结果。
+
+    2026-11-03 的 bug —— 接口声明了 conf、校验了 conf、网页上也画了输入框，
+    但 main.py 调 det.predict() 时压根没把它传进去，阈值是个装饰品。
+    这里把阈值调到 0.99（任何预测分数都到不了），必须一个框都不剩。
+    """
+    png = _png_bytes()
+
+    r = client.post(
+        "/detect",
+        files={"file": ("a.png", png, "image/png")},
+        data={"conf": "0.99"},
+    )
+    assert r.status_code == 200
+    assert r.json()["n_defects"] == 0, "conf=0.99 还有框，说明阈值没生效"
+    assert r.json()["verdict"] == "ok"
+
+    # 同一张图、低阈值，应该（至少有可能）有框 —— 证明差异来自 conf 而不是图片
+    r2 = client.post(
+        "/detect",
+        files={"file": ("b.png", png, "image/png")},
+        data={"conf": "0.01"},
+    )
+    assert r2.status_code == 200
+    assert r2.json()["n_defects"] >= r.json()["n_defects"]
+
+
 def test_record_not_found(client):
     r = client.get("/records/999999")
     assert r.status_code == 404

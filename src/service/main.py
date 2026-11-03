@@ -140,7 +140,9 @@ async def detect(
 
     # 推理是 CPU 密集的，必须丢线程池，否则会卡住整个事件循环
     det = app.state.detector
-    detections = await run_in_threadpool(det.predict, img)
+    # conf 必须传进去：之前这里漏了这个参数，导致页面上的「阈值」输入框
+    # 收得到、校验得到，但完全不影响结果（一个纯粹的装饰品）。
+    detections = await run_in_threadpool(det.predict, img, conf)
 
     # 落盘：按日期分目录，避免一个目录几万张图
     day = datetime.now().strftime("%Y%m%d")
