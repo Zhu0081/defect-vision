@@ -28,6 +28,9 @@ os.environ["DV_UPLOAD_DIR"] = str(_TMP / "data" / "uploads")
 os.environ["DV_DATABASE_URL"] = f"sqlite:///{(_TMP / 'data' / 'test.db').as_posix()}"
 os.environ["DV_MODEL_PATH"] = str(_TMP / "models" / "does-not-exist.onnx")
 os.environ["DV_MAX_UPLOAD_MB"] = "1"
+# 强制清空大模型 key：测试绝不能真的去调外部接口（慢、要钱、还不稳定）。
+# 清空后 AI 报告会自动走规则模板，正好测「降级通道」。
+os.environ["DV_LLM_API_KEY"] = ""
 
 import pytest  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402

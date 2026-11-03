@@ -33,3 +33,15 @@ MAX_UPLOAD_MB = int(os.getenv("DV_MAX_UPLOAD_MB", "16"))
 
 # 阈值：低于它的框直接丢掉（后续按产线要求再调）
 DEFAULT_CONF = float(os.getenv("DV_DEFAULT_CONF", "0.25"))
+
+# ---------- 大模型（AI 检测报告）----------
+# 走 OpenAI 兼容协议：DeepSeek / 通义 / 智谱 / 月之暗面 / 本地 vLLM / Ollama 都是这个格式。
+# 换服务商只改 base_url 和 model 两个环境变量，代码一行不动 —— 这就是「配置外置」的意义。
+#
+# 没配 key 时服务照样能用：会退回到「规则模板」生成报告，并在响应里标明 source=template。
+# 宁可降级，也不要让一个按钮点下去白屏 —— 演示现场不能靠运气。
+LLM_BASE_URL = os.getenv("DV_LLM_BASE_URL", "https://api.deepseek.com/v1")
+LLM_API_KEY = os.getenv("DV_LLM_API_KEY", "")
+LLM_MODEL = os.getenv("DV_LLM_MODEL", "deepseek-chat")
+LLM_TIMEOUT_S = float(os.getenv("DV_LLM_TIMEOUT_S", "20"))
+LLM_MAX_TOKENS = int(os.getenv("DV_LLM_MAX_TOKENS", "700"))

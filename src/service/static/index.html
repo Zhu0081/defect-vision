@@ -100,6 +100,26 @@
   td.num{font-variant-numeric:tabular-nums; text-align:right}
   .empty{color:var(--muted); font-size:13px; padding:10px 2px}
 
+  /* ---------- AI 报告 ---------- */
+  .ai-btn{
+    width:100%; margin-top:16px; background:#1e293b;
+  }
+  .ai-btn:hover:not(:disabled){background:#0f172a}
+  .ai-box{
+    margin-top:12px; padding:14px 16px; border:1px solid var(--line);
+    border-left:3px solid #0d9488; border-radius:10px; background:#f8fafc;
+    font-size:13px; line-height:1.75; white-space:pre-wrap; word-break:break-word;
+  }
+  .ai-box h4{
+    margin:12px 0 4px; font-size:12.5px; color:#0d9488;
+    letter-spacing:.3px; font-weight:700;
+  }
+  .ai-box h4:first-child{margin-top:0}
+  .ai-box .src{
+    display:block; margin-top:12px; padding-top:9px; border-top:1px dashed var(--line);
+    font-size:11.5px; color:var(--muted);
+  }
+
   details{margin-top:14px}
   summary{font-size:12.5px; color:var(--muted); cursor:pointer}
   pre{
@@ -175,6 +195,9 @@
       <div class="empty">检测后这里会列出每个缺陷的位置和置信度</div>
     </div>
 
+    <button id="ai" class="ai-btn" disabled>生成 AI 报告</button>
+    <div id="ai-box" class="ai-box" style="display:none"></div>
+
     <details>
       <summary>查看原始 JSON</summary>
       <pre id="json">—</pre>
@@ -190,6 +213,52 @@
 <script>
 const $ = id => document.getElementById(id);
 const LABELS = {scratch:"划痕", stain:"脏污", missing:"缺件", deform:"变形破损"};
+
+/* ---------- AI 报告 ---------- */
+// 记住当前这次检测的 id：报告是按「检测记录」生成的，不是按图片文件
+let lastId = null;
+
+function esc(s){
+  return String(s).replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+}
+
+// 极简 markdown：只认 ### 标题和 **加粗**。
+// 为什么不引 marked.js：一个 30KB 的库只为渲染四个小标题，不划算。
+function mdToHtml(md){
+  return String(md).split(/\r?\n/).map(line => {
+    const m = line.match(/^#{1,4}\s+(.*)$/);
+    if(m) return '<h4>' + esc(m[1]) + '</h4>';
+    if(!line.trim()) return '';
+    return '<div>' + esc(line).replace(/\*\*(.+?)\*\*/g, '<b>$1</b>') + '</div>';
+  }).join('');
+}
+
+async function generateReport(){
+  if(lastId == null) return;
+  const btn = $('ai'), box = $('ai-box');
+  btn.disabled = true;
+  btn.textContent = '生成中…';
+  box.style.display = 'block';
+  box.innerHTML = '<div class="empty">正在生成报告…</div>';
+  try{
+    const r = await fetch('/records/' + lastId + '/report', {method:'POST'});
+    if(!r.ok) throw new Error('HTTP ' + r.status);
+    const j = await r.json();
+    const who = j.source === 'llm'
+      ? ('大模型 ' + (j.model || ''))
+      : '规则模板（没配 API Key，或调用失败自动降级）';
+    box.innerHTML = mdToHtml(j.text)
+      + '<span class="src">来源：' + esc(who)
+      + ' · 耗时 ' + Math.round(j.latency_ms) + ' ms'
+      + (j.cached ? ' · 命中缓存' : '') + '</span>';
+  }catch(e){
+    box.innerHTML = '<div class="empty">生成失败：' + esc(e.message) + '</div>';
+  }finally{
+    btn.disabled = false;
+    btn.textContent = '重新生成报告';
+  }
+}
+$('ai').addEventListener('click', generateReport);
 
 /* ---------- 健康检查 ---------- */
 async function loadHealth(){
@@ -300,6 +369,14 @@ function render(j){
       + '</tbody></table>';
   }
   $('json').textContent = JSON.stringify(j, null, 2);
+
+  // 每次新检测都重置报告区：否则你会把上一次的报告当成这一次的
+  lastId = j.inspection_id;
+  const btn = $('ai');
+  btn.disabled = false;
+  btn.textContent = '生成 AI 报告';
+  $('ai-box').style.display = 'none';
+  $('ai-box').innerHTML = '';
 }
 
 /* ---------- 历史 ---------- */
@@ -327,8 +404,22 @@ async function replay(iid){
 }
 
 loadHistory();
-const auto = new URLSearchParams(location.search).get('auto');
+const qs = new URLSearchParams(location.search);
+const auto = qs.get('auto');
 if(auto) setTimeout(() => replay(auto), 250);
+
+// ?auto=63&report=1 —— 回放的同时自动生成报告。
+// 为什么要这个参数：录演示视频时不可能一边讲台词一边点按钮，
+// 用一条 URL 就能把「检测 → 报告」整条流程走完，录第二遍不用重新点。
+if(auto && qs.get('report')){
+  const timer = setInterval(() => {
+    if(lastId != null && !$('ai').disabled){
+      clearInterval(timer);
+      generateReport();
+    }
+  }, 200);
+  setTimeout(() => clearInterval(timer), 15000);  // 兜底：15 秒还没好就不再等
+}
 </script>
 </body>
 </html>

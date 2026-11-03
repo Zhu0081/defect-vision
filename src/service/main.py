@@ -32,7 +32,7 @@ from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
 
-from . import config, db, schemas
+from . import config, db, llm, schemas
 from .detector import build_detector
 
 # 结构化日志：时间、级别、来源、消息。
@@ -234,6 +234,49 @@ def get_record(iid: int) -> dict:
     if row is None:
         raise HTTPException(status_code=404, detail=f"没有 id={iid} 的记录")
     return row
+
+
+@app.post("/records/{iid}/report", response_model=schemas.AiReportOut, tags=["AI"])
+async def make_ai_report(iid: int, force: bool = False) -> schemas.AiReportOut:
+    """给一次检测生成中文报告。
+
+    两个设计点（面试会问的那种）：
+
+    1. **默认走缓存**。报告生成一次要花钱（token）也要时间（1~3 秒），
+       同一条检测重复点按钮不该重复付费。要重新生成就带 ?force=true。
+    2. **调用的是异步函数，但数据库是同步的** —— 所以数据库操作必须走
+       run_in_threadpool，否则会卡住整个事件循环（和 /detect 里推理同一回事）。
+    """
+    row = await run_in_threadpool(db.get_inspection, iid)
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"没有 id={iid} 的记录")
+
+    # 已经生成过就直接返回，不重复花钱
+    if row.get("ai_report") and not force:
+        log.info("[report] id=%s 命中缓存（source=%s）", iid, row.get("ai_report_source"))
+        return schemas.AiReportOut(
+            inspection_id=iid,
+            text=row["ai_report"],
+            source=row.get("ai_report_source") or "template",
+            model=None,
+            latency_ms=0.0,
+            cached=True,
+        )
+
+    summary = await run_in_threadpool(db.report_summary)
+    result = await llm.generate_report(row, summary)
+
+    await run_in_threadpool(db.save_ai_report, iid, result.text, result.source)
+    log.info("[report] id=%s source=%s 耗时=%.0fms", iid, result.source, result.latency_ms)
+
+    return schemas.AiReportOut(
+        inspection_id=iid,
+        text=result.text,
+        source=result.source,
+        model=result.model,
+        latency_ms=result.latency_ms,
+        cached=False,
+    )
 
 
 @app.get("/image/{iid}", include_in_schema=False)

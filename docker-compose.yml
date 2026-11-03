@@ -42,6 +42,12 @@ services:
       # 容器里的 localhost 指的是容器自己
       DV_DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@db:5432/${POSTGRES_DB:-defect}
       DV_DEFAULT_CONF: "0.25"
+      # AI 报告用的三个变量：从宿主机 .env 透传进容器。
+      # 这里**不写默认值**，因为 key 绝不该有默认值；
+      # 没配就留空，服务会自动降级成规则模板。
+      DV_LLM_BASE_URL: ${DV_LLM_BASE_URL:-https://api.deepseek.com/v1}
+      DV_LLM_API_KEY: ${DV_LLM_API_KEY:-}
+      DV_LLM_MODEL: ${DV_LLM_MODEL:-deepseek-chat}
     depends_on:
       db:
         condition: service_healthy

@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 from pathlib import PurePath
+from datetime import datetime
 from typing import Any
 
 from sqlalchemy import create_engine, text
@@ -106,6 +107,12 @@ def get_engine() -> Engine:
 # 新字段必须单独 ALTER。生产上这一步叫 schema migration。
 MIGRATIONS: list[tuple[str, str, str]] = [
     ("inspection", "gt_verdict", "gt_verdict VARCHAR(16)"),
+    # AI 报告的三个字段：正文、来源（llm/template）、生成时间。
+    # 分开存而不是只存正文，是因为「这段字是谁写的」必须能被验证 ——
+    # 面试官问「这句是模型写的还是你写的」，你得能查。
+    ("inspection", "ai_report", "ai_report TEXT"),
+    ("inspection", "ai_report_source", "ai_report_source VARCHAR(16)"),
+    ("inspection", "ai_report_at", "ai_report_at VARCHAR(32)"),
 ]
 
 
@@ -246,6 +253,36 @@ def get_inspection(iid: int) -> dict | None:
     out = dict(head)
     out["items"] = [dict(r) for r in items]
     return out
+
+
+def save_ai_report(iid: int, report_text: str, source: str) -> None:
+    """把生成的报告写回记录。
+
+    为什么不是 INSERT 一张新表：一份检测对应一份报告，1:1 关系。
+    另开表会让 get_inspection 多一次 JOIN，而这里省下的复杂度不值那个钱。
+
+    ⚠ 参数名不能叫 text —— db.py 顶部 `from sqlalchemy import text` 导入了同名函数，
+    参数会把它遮蔽掉，于是 `text("UPDATE ...")` 变成「调用一个字符串」→
+    TypeError: 'str' object is not callable。
+    """
+    with get_engine().begin() as conn:
+        conn.execute(
+            text(
+                """
+                UPDATE inspection
+                   SET ai_report = :t,
+                       ai_report_source = :s,
+                       ai_report_at = :at
+                 WHERE id = :iid
+                """
+            ),
+            {
+                "t": report_text,
+                "s": source,
+                "at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "iid": iid,
+            },
+        )
 
 
 def stats_by_light() -> list[dict]:

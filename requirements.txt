@@ -6,6 +6,8 @@ python-multipart>=0.0.9
 opencv-python>=4.10
 numpy>=1.26
 requests>=2.31
+# AI 报告要调大模型的 HTTP 接口（OpenAI 兼容协议）
+httpx>=0.27
 
 # 训练/推理阶段才需要（现在不要装，装了会拖慢 pip）
 # ultralytics>=8.3

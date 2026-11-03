@@ -119,3 +119,49 @@ def test_stats_and_report(client):
     r = client.get("/report")
     assert r.status_code == 200
     assert "confusion" in r.json()
+
+
+def test_ai_report_falls_back_to_template(client):
+    """没配 API Key 时，AI 报告必须降级成模板，而不是 500。
+
+    这是这个功能最重要的测试：报告是锦上添花，绝不能因为它把主流程搞挂。
+    conftest 已经把 DV_LLM_API_KEY 清空，所以这里走的一定是降级通道。
+    """
+    r = client.post("/detect", files={"file": ("r.png", _png_bytes(), "image/png")})
+    assert r.status_code == 200
+    iid = r.json()["inspection_id"]
+
+    rep = client.post(f"/records/{iid}/report")
+    assert rep.status_code == 200
+    body = rep.json()
+    assert body["source"] == "template"
+    assert body["cached"] is False
+    # 四个固定小标题，前端靠它渲染分节
+    for sec in ("判定结论", "缺陷情况", "风险提示", "建议动作"):
+        assert sec in body["text"], f"报告缺少小节：{sec}"
+
+    # 说存了就必须真能查回来
+    got = client.get(f"/records/{iid}").json()
+    assert got["ai_report"] == body["text"]
+    assert got["ai_report_source"] == "template"
+
+
+def test_ai_report_is_cached(client):
+    """同一条记录点第二次，不能重复生成（重复生成 = 重复花钱）。"""
+    r = client.post("/detect", files={"file": ("c.png", _png_bytes(), "image/png")})
+    iid = r.json()["inspection_id"]
+
+    first = client.post(f"/records/{iid}/report").json()
+    assert first["cached"] is False
+
+    second = client.post(f"/records/{iid}/report").json()
+    assert second["cached"] is True
+    assert second["text"] == first["text"]
+
+    # force=true 强制重新生成
+    third = client.post(f"/records/{iid}/report?force=true").json()
+    assert third["cached"] is False
+
+
+def test_ai_report_unknown_id(client):
+    assert client.post("/records/999999/report").status_code == 404

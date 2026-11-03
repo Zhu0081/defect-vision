@@ -1,7 +1,7 @@
 # 工业表面缺陷检测 · 端到端 Demo
 
 用一台笔记本，从零做一套能跑的工业视觉质检系统（**训练与推理刻意只用 CPU**，对齐产线工控机）：
-**手机拍 → 标注 → 训练 → 导出 ONNX → FastAPI 服务 → PostgreSQL 落库 → 网页演示**。
+**手机拍 → 标注 → 训练 → 导出 ONNX → FastAPI 服务 → PostgreSQL 落库 → 网页演示 → 大模型生成质检报告**。
 
 全部在 CPU 上跑通，不依赖 GPU、不依赖付费数据集、不需要开发板。
 
@@ -256,6 +256,35 @@ if len(raw) > LIMIT: raise 413
 
 写这批测试时抓到一个真 bug：`path.relative_to(BASE_DIR)` 在上传目录被指到项目外时会抛 `ValueError` → 500。这是纯靠读代码看不出来的。
 
+### 8. AI 报告只喂结构化数据，不喂图片
+
+`/records/{id}/report` 会生成一段中文质检报告。关键取舍：**不把图片发给视觉大模型，只把检测结果的结构化字段发过去。**
+
+| 方案 | 成本 | 稳定性 | 能回答什么 |
+|---|---|---|---|
+| 视觉大模型看图 | 每次几十秒、按图计费 | 会编造看不到的细节 | 「图里有什么」 |
+| 只喂结构化结果（本方案） | 零点几秒、几百 token | 数字全部来自数据库，不会编 | 「这些数字意味着什么」 |
+
+检测结果本来就已经是结构化数据了，模型只需要**把数字翻译成人话**，不需要看图 —— 这一步省掉大约 90% 的成本。
+
+配套的三条约束：
+- **必须能降级**：没配 `DV_LLM_API_KEY`、超时、限流、返回空内容，全部自动退回规则模板，接口永远不会 500，响应里用 `source` 字段标明 `llm` / `template`
+- **默认走缓存**：同一条记录重复点按钮不重复花钱，要重生成加 `?force=true`
+- **温度压到 0.2**：质检报告要稳定复现，不要文采；prompt 里明确禁止推测
+
+```bash
+# 有 key 就是大模型，没 key 就是模板 —— 前端会显示来源
+curl -X POST http://127.0.0.1:8010/records/63/report
+```
+
+### 9. 方言差异：测试全绿，线上 500
+
+测试跑 SQLite、线上跑 PostgreSQL，同一个 `TIMESTAMP` 列，SQLite 返回字符串、PG 返回 `datetime` 对象。
+响应模型里写 `created_at: str` 时，**测试全绿、线上 `/records` 直接 500**（`ResponseValidationError`）。
+改成 `datetime | None`，两种方言都吃得下。
+
+教训：**测试通过只证明「在这套方言下通过」**。要么测试也跑 PG，要么就别依赖方言的隐式转换。
+
 ---
 
 ## 已知限制
@@ -284,6 +313,7 @@ if len(raw) > LIMIT: raise 413
 | 推理 | ONNX Runtime CPU（opset 12，导出时固化 NMS） |
 | 服务 | FastAPI + Uvicorn |
 | 数据库 | PostgreSQL 17（inspection / defect_item，外键级联删除） |
+| 报告 | 大模型（OpenAI 兼容协议）+ 规则模板双通道，无 key 自动降级 |
 | 部署 | Docker + Docker Compose |
 | 环境 | Python 3.11 / Windows 11 / i5-13500HX 20 线程 / 本链路只用 CPU（机器另有 RTX 4060 8GB，未启用） |
 

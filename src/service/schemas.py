@@ -10,6 +10,8 @@
 
 from __future__ import annotations
 
+from datetime import datetime
+
 from pydantic import BaseModel, Field
 
 
@@ -55,7 +57,24 @@ class RecordOut(BaseModel):
     n_defects: int
     max_score: float
     latency_ms: float
-    created_at: str | None = None
+    # 必须是 datetime 而不是 str：PostgreSQL 的 TIMESTAMP 列返回的是 datetime 对象，
+    # 声明成 str 会让 FastAPI 在响应校验时抛 ResponseValidationError → 500。
+    # 而 SQLite 是动态类型，同样的列返回的是字符串，pydantic 也能解析，
+    # 所以 datetime 这个声明两种数据库都吃得下。
+    created_at: datetime | None = None
+    # 报告字段可空：还没生成过就是 None，前端据此决定「显示生成按钮」还是「显示报告」
+    ai_report: str | None = None
+    ai_report_source: str | None = None
+    ai_report_at: str | None = None
+
+
+class AiReportOut(BaseModel):
+    inspection_id: int
+    text: str = Field(..., description="Markdown 报告正文，四个固定小标题")
+    source: str = Field(..., description="llm=真调了大模型 / template=降级到规则模板")
+    model: str | None = Field(None, description="实际使用的模型名，降级时为 null")
+    latency_ms: float = Field(..., description="生成耗时（含网络）")
+    cached: bool = Field(False, description="true 表示直接返回库里已存的报告，没有重新生成")
 
 
 class StatsRow(BaseModel):
