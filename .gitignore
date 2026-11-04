@@ -34,5 +34,13 @@ secrets/
 Thumbs.db
 *.log
 
-# ¸öÈËÑ§Ï°±Ê¼Ç£¬²»½ø¹«¿ª²Ö¿â
+# ============ C++ æ„å»ºäº§ç‰©ä¸è¿è¡Œä¾èµ– ============
+src/cpp/*.exe
+src/cpp/*.o
+src/cpp/*.obj
+src/cpp/input_*.bin
+src/cpp/input_meta.txt
+src/cpp/onnxruntime*.dll
+
+# ä¸ªäººå­¦ä¹ ç¬”è®°ï¼Œä¸è¿›å…¬å¼€ä»“åº“
 _private/
