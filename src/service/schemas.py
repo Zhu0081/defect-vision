@@ -24,6 +24,10 @@ class DefectItem(BaseModel):
         max_length=4,
         description="归一化坐标 [x1, y1, x2, y2]，取值 0~1",
     )
+    polygon: list[list[float]] = Field(
+        default_factory=list,
+        description="归一化的缺陷轮廓 [[x, y], ...]；检测框模型返回空数组",
+    )
 
 
 class DetectResponse(BaseModel):

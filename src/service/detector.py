@@ -31,6 +31,8 @@ class Detection:
     score: float
     # 归一化到原图 [0,1] 的 xyxy
     box: tuple[float, float, float, float]
+    # 归一化到原图 [0,1] 的多边形轮廓（分割模型才有；检测框模型为 None）
+    polygon: tuple[tuple[float, float], ...] | None = None
 
 
 class BaseDetector:
@@ -85,22 +87,25 @@ class MockDetector(BaseDetector):
 
 
 class OnnxDetector(BaseDetector):
-    """ONNX Runtime CPU 推理。
+    """ONNX Runtime CPU 推理（自己解码 + 自己 NMS + 自己还原掩膜）。
 
-    对模型输出格式的要求（**这是最容易踩的坑**）：
-        ultralytics YOLO 默认导出的是 [1, 84, 8400]，里面是未解码的 DFL 分布，
-        直接用会得到一堆乱框。导出时加 nms=True，输出才变成带 NMS 的 [1, N, 6+]：
+    输出格式（ultralytics 标准导出，**不加 nms=True**）：
 
-            detect 模型：[1, 300, 6]      x1,y1,x2,y2,score,class_id
-            seg 模型：   [1, 300, 38]     x1,y1,x2,y2,score,class_id + 32 个 mask 系数
-                         （本项目是 seg 模型，只取前 6 列；mask 系数暂时丢掉）
+        output0: [1, 4 + nc + 32, 33600]   cx,cy,w,h + nc 个类别分数 + 32 个 mask 系数
+        output1: [1, 32, 320, 320]         32 张 mask 原型
 
-        ⚠ 导出的框坐标是在 **letterbox 后的 imgsz×imgsz 画布上**（已实测），
-          不是原图像素 —— 所以下面的反 letterbox 是必需的，不能省。
+    ⚠ 为什么不用 nms=True 导出（踩过一次，值得记）：
+      加 nms=True 后输出变成 [1, 300, 38]，框是好用的，但**同一行里的 32 个 mask
+      系数和这张图的掩膜已经对不上了**。实测拿它去和 PyTorch 的真掩膜算空间相关系数
+      只有 0.083（≈无关），解出来的"多边形"是满屏噪点。
+      所以要做掩膜，就必须拿不带 NMS 的导出、在后处理里自己算。
 
-    导出命令（Windows PowerShell，在项目根目录）：
-        python -c "from ultralytics import YOLO; YOLO('runs/segment/baseline_v1/weights/best.pt')\
-            .export(format='onnx', imgsz=1280, opset=12, simplify=True, nms=True, device='cpu')"
+    顺带解决另一个老问题：阈值写进模型后，运行时只能往上调、不能往下调；
+    现在 NMS 在后处理里，`conf` 参数任意调。
+
+    导出命令（项目根目录）：
+        python -c "from ultralytics import YOLO; YOLO('runs/segment/baseline_v4/weights/best.pt')\
+            .export(format='onnx', imgsz=1280, opset=12, simplify=True, nms=False, device='cpu')"
 
     没装 onnxruntime、或模型文件不存在时，build_detector() 会回退到 MockDetector。
     """
@@ -155,34 +160,184 @@ class OnnxDetector(BaseDetector):
         blob = canvas[:, :, ::-1].astype(np.float32) / 255.0  # BGR->RGB, 归一化
         blob = np.transpose(blob, (2, 0, 1))[None]            # HWC -> NCHW
 
-        preds = self.session.run(None, {self.input_name: blob})[0]
-        preds = np.asarray(preds)
-        if preds.ndim == 3:
-            preds = preds[0]
+        outs = self.session.run(None, {self.input_name: blob})
+        pred = np.asarray(outs[0])[0].T           # (4+nc+32, N) -> (N, ...)
+        protos = np.asarray(outs[1])[0] if len(outs) > 1 else None
+
+        nc = len(LABELS)
+        if pred.shape[1] < 4 + nc:
+            raise RuntimeError(f"模型输出只有 {pred.shape[1]} 列，装不下 {nc} 个类别")
+
+        cls_scores = pred[:, 4 : 4 + nc]
+        cls = cls_scores.argmax(axis=1)
+        score = cls_scores[np.arange(len(pred)), cls]
+
+        keep = score >= thr
+        if not keep.any():
+            return []
+
+        # cx,cy,w,h（画布像素）→ xyxy（画布像素）
+        cx, cy, bw, bh = pred[keep, 0], pred[keep, 1], pred[keep, 2], pred[keep, 3]
+        x1, y1 = cx - bw / 2, cy - bh / 2
+        x2, y2 = cx + bw / 2, cy + bh / 2
+
+        keep_idx = np.flatnonzero(keep)
+        kept = self._nms(x1, y1, x2, y2, score[keep], iou_thr=0.5)
+
+        coefs = pred[keep, 4 + nc :] if protos is not None else None
 
         out: list[Detection] = []
-        for row in preds:
-            if row.shape[0] < 6:
-                continue
-            x1, y1, x2, y2, score, cls = row[:6]
-            if float(score) < thr:
-                continue
-            # 从 letterbox 坐标还原到原图，再归一化
-            ox1 = max(0.0, (float(x1) - left) / r) / w
-            oy1 = max(0.0, (float(y1) - top) / r) / h
-            ox2 = min(float(w), (float(x2) - left) / r) / w
-            oy2 = min(float(h), (float(y2) - top) / r) / h
+        for j in kept:
+            k = keep_idx[j]
+            ox1 = max(0.0, (float(x1[j]) - left) / r) / w
+            oy1 = max(0.0, (float(y1[j]) - top) / r) / h
+            ox2 = min(float(w), (float(x2[j]) - left) / r) / w
+            oy2 = min(float(h), (float(y2[j]) - top) / r) / h
             if ox2 <= ox1 or oy2 <= oy1:
                 continue
-            idx = int(cls)
+            idx = int(cls[k])
+            poly = (
+                self._decode_mask(coefs[j], protos, (x1[j], y1[j], x2[j], y2[j]),
+                                  left, top, r, w, h)
+                if coefs is not None else None
+            )
             out.append(
                 Detection(
                     label=LABELS[idx] if 0 <= idx < len(LABELS) else f"cls{idx}",
-                    score=round(float(score), 3),
+                    score=round(float(score[k]), 3),
                     box=(round(ox1, 4), round(oy1, 4), round(ox2, 4), round(oy2, 4)),
+                    polygon=poly,
                 )
             )
         return out
+
+    @staticmethod
+    def _nms(x1: np.ndarray, y1: np.ndarray, x2: np.ndarray, y2: np.ndarray,
+             scores: np.ndarray, iou_thr: float = 0.5) -> list[int]:
+        """按分数从高到低贪心抑制：和已保留框的 IoU 超过阈值就丢掉。"""
+        order = scores.argsort()[::-1]
+        areas = (x2 - x1) * (y2 - y1)
+        keep: list[int] = []
+        while order.size > 0:
+            i = int(order[0])
+            keep.append(i)
+            if order.size == 1:
+                break
+            rest = order[1:]
+            xx1 = np.maximum(x1[i], x1[rest])
+            yy1 = np.maximum(y1[i], y1[rest])
+            xx2 = np.minimum(x2[i], x2[rest])
+            yy2 = np.minimum(y2[i], y2[rest])
+            iw = np.maximum(0.0, xx2 - xx1)
+            ih = np.maximum(0.0, yy2 - yy1)
+            inter = iw * ih
+            iou = inter / (areas[i] + areas[rest] - inter + 1e-9)
+            order = rest[iou <= iou_thr]
+        return keep
+
+    def _decode_mask(self, coef: np.ndarray, proto: np.ndarray,
+                     box_canvas: tuple[float, float, float, float],
+                     left: int, top: int, r: float, w: int, h: int,
+                     thr: float = 0.25, min_area: int = 12
+                     ) -> tuple[tuple[float, float], ...] | None:
+        """32 个系数 × 32 张 mask 原型 → 一张轮廓图 → 简化成多边形。
+
+        两个必须做的裁剪（少一步都会画歪）：
+        ① 先把内容区（去掉 letterbox 灰边）裁出来；
+        ② **再把检测框外面全部清零** —— 不裁的话，纸的边缘、台灯的亮斑
+           也会被这套系数点亮，面积比缺陷大得多，"最大连通块"就会选到纸边上去。
+           实测：不裁框时多边形框住半张纸，裁了才贴着划痕走。
+        """
+        import cv2
+
+        ph, pw = proto.shape[1], proto.shape[2]
+        flat = proto.reshape(proto.shape[0], -1).astype(np.float32)
+        logits = np.clip(coef.astype(np.float32) @ flat, -30.0, 30.0)
+        mask = (1.0 / (1.0 + np.exp(-logits))).reshape(ph, pw)
+
+        # 原型网格 → 画布像素的缩放倍率
+        scale = float(self.imgsz) / pw
+        # 内容区在原型网格上的范围（去掉上下左右灰边）
+        mx1 = int(round(left / scale))
+        my1 = int(round(top / scale))
+        mx2 = int(round((left + round(w * r)) / scale))
+        my2 = int(round((top + round(h * r)) / scale))
+        mx2 = max(mx1 + 2, min(mx2, pw))
+        my2 = max(my1 + 2, min(my2, ph))
+        crop = mask[my1:my2, mx1:mx2].copy()
+
+        # ② 检测框以外清零（坐标都是原型网格坐标）
+        bx1 = max(0, int(round(box_canvas[0] / scale)) - mx1)
+        by1 = max(0, int(round(box_canvas[1] / scale)) - my1)
+        bx2 = min(crop.shape[1], int(round(box_canvas[2] / scale)) - mx1)
+        by2 = min(crop.shape[0], int(round(box_canvas[3] / scale)) - my1)
+        if bx2 - bx1 < 2 or by2 - by1 < 2:
+            return None
+        inside = np.zeros_like(crop)
+        inside[by1:by2, bx1:bx2] = crop[by1:by2, bx1:bx2]
+        crop = inside
+
+        # ③ 上采样再做阈值和轮廓
+        #    原型只有 320×320，一个原型像素 = 原图约 12.6 px。
+        #    20 px 宽的划痕在原型网格上只剩 1.6 px，直接阈值会把两端吃掉，
+        #    轮廓点也会卡在 12 px 的格子上。先放大 8 倍再找轮廓，边缘才连续。
+        UP = 8
+        big = cv2.resize(crop, None, fx=UP, fy=UP, interpolation=cv2.INTER_CUBIC)
+        binary = (big > thr).astype(np.uint8)
+        # 再膨胀两个上采样像素（约 3 个原图像素），把断开的笔画粘起来
+        binary = cv2.dilate(binary, np.ones((3, 3), np.uint8), iterations=1)
+        if int(binary.sum()) < min_area * UP * UP // 8:
+            return None
+
+        contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if not contours:
+            return None
+        biggest = max(contours, key=cv2.contourArea)
+        eps = 0.002 * cv2.arcLength(biggest, True)
+        approx = cv2.approxPolyDP(biggest, eps, True).reshape(-1, 2).astype(np.float32)
+        if approx.shape[0] < 3:
+            return None
+
+        # 轮廓点（上采样网格）→ 原型网格 → 画布像素 → 原图像素 → 归一化
+        approx[:, 0] = (approx[:, 0] / UP + mx1) * scale
+        approx[:, 1] = (approx[:, 1] / UP + my1) * scale
+        approx[:, 0] = (approx[:, 0] - left) / r / w
+        approx[:, 1] = (approx[:, 1] - top) / r / h
+        approx[:, 0] = np.clip(approx[:, 0], 0.0, 1.0)
+        approx[:, 1] = np.clip(approx[:, 1], 0.0, 1.0)
+        return tuple((round(float(px), 4), round(float(py), 4)) for px, py in approx)
+
+    def _decode_mask_unused(self, coef: np.ndarray, proto: np.ndarray,
+                            left: int, top: int, r: float, w: int, h: int,
+                            thr: float = 0.5, min_area: int = 20
+                            ) -> tuple[tuple[float, float], ...] | None:
+        """（旧版，已废弃）原型按整幅 imgsz 画布映射，实测会偏。"""
+        import cv2
+
+        ch, cw = proto.shape[1], proto.shape[2]
+        flat = proto.reshape(proto.shape[0], -1).astype(np.float32)
+        logits = coef.astype(np.float32) @ flat
+        mask = (1.0 / (1.0 + np.exp(-logits))).reshape(ch, cw)
+        binary = (mask > thr).astype(np.uint8)
+        if int(binary.sum()) < min_area:
+            return None
+
+        contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if not contours:
+            return None
+        biggest = max(contours, key=cv2.contourArea)
+        eps = 0.002 * cv2.arcLength(biggest, True)
+        approx = cv2.approxPolyDP(biggest, eps, True).reshape(-1, 2).astype(np.float32)
+        if approx.shape[0] < 3:
+            return None
+
+        scale = float(self.imgsz) / cw          # 160 → 1280
+        approx = approx * scale
+        approx[:, 0] = (approx[:, 0] - left) / r
+        approx[:, 1] = (approx[:, 1] - top) / r
+        approx[:, 0] = np.clip(approx[:, 0], 0.0, float(w)) / w
+        approx[:, 1] = np.clip(approx[:, 1], 0.0, float(h)) / h
+        return tuple((round(float(px), 4), round(float(py), 4)) for px, py in approx)
 
 
 def build_detector(model_path: Path, conf: float = 0.25,

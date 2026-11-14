@@ -159,7 +159,8 @@ async def detect(
     latency_ms = round((time.perf_counter() - t0) * 1000, 2)
     items = [
         {"label": d.label, "score": d.score, "x1": d.box[0], "y1": d.box[1],
-         "x2": d.box[2], "y2": d.box[3]}
+         "x2": d.box[2], "y2": d.box[3],
+         "polygon": [list(p) for p in d.polygon] if d.polygon else []}
         for d in detections
     ]
     verdict = "ng" if items else "ok"
@@ -215,7 +216,8 @@ async def detect(
         is_mock=det.is_mock,
         items=[
             schemas.DefectItem(label=i["label"], score=i["score"],
-                               box=[i["x1"], i["y1"], i["x2"], i["y2"]])
+                               box=[i["x1"], i["y1"], i["x2"], i["y2"]],
+                               polygon=i.get("polygon") or [])
             for i in items
         ],
         image_url=f"/image/{iid}",

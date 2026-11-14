@@ -44,3 +44,6 @@ src/cpp/onnxruntime*.dll
 
 # ä¸ªäººå­¦ä¹ ç¬”è®°ï¼Œä¸è¿›å…¬å¼€ä»“åº“
 _private/
+# C# ±àÒë²úÎï
+src/csharp/**/bin/
+src/csharp/**/obj/
