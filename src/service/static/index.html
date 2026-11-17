@@ -137,6 +137,26 @@
   /* ---------- 历史 ---------- */
   .history{max-width:1180px; margin:0 auto 40px; padding:0 16px}
   .hist{display:grid; grid-template-columns:repeat(auto-fill,minmax(150px,1fr)); gap:12px}
+
+  /* ---------- 质检统计 ---------- */
+  .scope{display:flex; flex-wrap:wrap; gap:10px; align-items:center; margin:0 0 14px}
+  .scope label{font-size:12.5px; color:var(--muted); display:flex; align-items:center; gap:6px}
+  .scope input{
+    width:130px; padding:7px 9px; border:1px solid var(--line); border-radius:8px;
+    font:inherit; font-size:13px; color:var(--ink);
+  }
+  .scope button{width:auto; padding:8px 18px; font-size:13.5px}
+  .rate{display:grid; grid-template-columns:repeat(4,1fr); gap:8px; margin-bottom:10px}
+  @media (max-width:560px){ .rate{grid-template-columns:repeat(2,1fr)} }
+  .cm{display:grid; grid-template-columns:repeat(4,1fr); gap:8px; margin-bottom:12px}
+  @media (max-width:560px){ .cm{grid-template-columns:repeat(2,1fr)} }
+  .cm div{
+    background:#f8fafc; border:1px solid var(--line); border-radius:8px;
+    padding:8px; text-align:center; font-size:11.5px; color:var(--muted);
+  }
+  .cm b{display:block; font-size:15px; color:var(--ink); font-variant-numeric:tabular-nums}
+  .scope-note{font-size:12px; color:var(--muted); line-height:1.7}
+  .scope-note b{color:var(--ink); font-weight:600}
   .card{
     border:1px solid var(--line); border-radius:11px; overflow:hidden;
     background:#fff; text-decoration:none; color:inherit; display:block;
@@ -215,6 +235,33 @@
 <section class="history">
   <h2 style="font-size:14px;color:#64748b;margin:0 0 12px">最近检测记录</h2>
   <div id="hist" class="hist"></div>
+</section>
+
+<section class="history">
+  <h2 style="font-size:14px;color:#64748b;margin:0 0 12px">质检统计（漏检率 / 过杀率）</h2>
+  <div class="panel" style="padding:16px">
+    <div class="scope">
+      <label>从哪天起<input id="r-since" type="date"></label>
+      <label>模型<input id="r-model" placeholder="全部" maxlength="40"></label>
+      <button id="r-go">查询</button>
+    </div>
+
+    <div class="rate">
+      <div class="stat"><b id="r-miss">—</b><span>漏检率</span></div>
+      <div class="stat"><b id="r-over">—</b><span>过杀率</span></div>
+      <div class="stat"><b id="r-total">—</b><span>记录总数</span></div>
+      <div class="stat"><b id="r-p95">—</b><span>P95 耗时 ms</span></div>
+    </div>
+
+    <div class="cm">
+      <div>TP 判对缺陷<b id="r-tp">—</b></div>
+      <div>FN 漏检<b id="r-fn">—</b></div>
+      <div>FP 过杀<b id="r-fp">—</b></div>
+      <div>TN 正确放行<b id="r-tn">—</b></div>
+    </div>
+
+    <div class="scope-note" id="r-note">口径：还没查</div>
+  </div>
 </section>
 
 <script>
@@ -441,8 +488,56 @@ async function replay(iid){
   }catch(e){ $('msg').textContent = '回放失败：' + e; }
 }
 
-loadHistory();
+/* ---------- 质检统计：漏检率 / 过杀率 ---------- */
+// 为什么要有「从哪天起」这个框：
+// 这个库里什么时期的记录都有。换模型之前的失败样本会一直算在当前模型头上，
+// 实测全历史漏检 19.39%，但只看 11-14 之后是 0%。
+// 所以口径必须显示在数字旁边 —— 数字不带口径就等于没数字。
+async function loadReport(){
+  const since = $('r-since').value.trim();
+  const model = $('r-model').value.trim();
+  const q = new URLSearchParams();
+  if(since) q.set('since', since);
+  if(model) q.set('model', model);
+  const url = '/report' + (q.toString() ? '?' + q : '');
+  const pct = v => (v === null || v === undefined) ? '—' : Number(v).toFixed(2) + '%';
+  try{
+    const r = await (await fetch(url)).json();
+    $('r-miss').textContent  = pct(r.miss_rate_pct);
+    $('r-over').textContent  = pct(r.overkill_rate_pct);
+    $('r-total').textContent = r.total_inspections;
+    $('r-p95').textContent   = r.latency_ms ? r.latency_ms.p95 : '—';
+    $('r-tp').textContent = r.confusion.tp;
+    $('r-fn').textContent = r.confusion.fn;
+    $('r-fp').textContent = r.confusion.fp;
+    $('r-tn').textContent = r.confusion.tn;
+
+    let note = '口径：<b>' + (since ? since + ' 起（本地时间）' : '全部历史')
+             + '</b> · 模型 <b>' + (model || '全部') + '</b>'
+             + ' · 已判定 <b>' + r.labeled + '</b> 条，共 ' + r.total_inspections + ' 条';
+    if(r.excluded_mock) note += ' · 已排除 Mock <b>' + r.excluded_mock + '</b> 条';
+    if(r.total_inspections && !r.labeled){
+      note += '<br>这个区间没有回填过真值的记录，漏检率算不出来（不是 0）。';
+    }else if(r.overkill_rate_pct === null){
+      note += '<br>过杀率显示 — 是因为这段区间没有良品记录，分母为 0，不是 0%。';
+    }else if(r.miss_rate_pct === null){
+      note += '<br>漏检率显示 — 是因为这段区间没有缺陷记录，分母为 0，不是 0%。';
+    }
+    $('r-note').innerHTML = note;
+  }catch(e){
+    $('r-note').textContent = '查询失败：' + e;
+  }
+}
+$('r-go').addEventListener('click', loadReport);
+
 const qs = new URLSearchParams(location.search);
+// ?since=2026-11-14&model=onnx:best.onnx —— 打开链接就把口径带进输入框。
+// 录演示视频时不用一边讲一边点日期，一条 URL 就能直接把「切了口径的统计」放出来。
+if(qs.get('since')) $('r-since').value = qs.get('since');
+if(qs.get('model')) $('r-model').value = qs.get('model');
+
+loadHistory();
+loadReport();
 const auto = qs.get('auto');
 if(auto) setTimeout(() => replay(auto), 250);
 
