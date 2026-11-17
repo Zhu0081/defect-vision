@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import json
 from pathlib import PurePath
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from sqlalchemy import create_engine, text
@@ -406,7 +406,10 @@ def _percentile(values: list[float], p: float) -> float:
     return round(s[lo] + (s[hi] - s[lo]) * (k - lo), 2)
 
 
-def report_summary() -> dict[str, Any]:
+def report_summary(
+    since: datetime | None = None,
+    model: str | None = None,
+) -> dict[str, Any]:
     """混淆矩阵 + 漏检率/过杀率 + 节拍分位数。
 
     约定：gt_verdict = 'ng' 是正样本（真有缺陷）。
@@ -414,25 +417,51 @@ def report_summary() -> dict[str, Any]:
         FN = 真有缺陷 && 判 ok   -> 漏检（最贵，流到客户手里）
         FP = 本来好的 && 判 ng   -> 过杀（产线自己承担成本）
         TN = 本来好的 && 判 ok
+
+    为什么要有 since / model 两个过滤：
+        这个库是「所有历史」的桶。换过模型、换过阈值、换过推理尺寸的记录
+        全都堆在一起。直接聚合会把旧模型犯的错算到新模型头上 ——
+        实测就有一次：全历史漏检 19.39%，但只看当前模型上线后的记录是 0%。
+
+    created_at 是 TIMESTAMP（不带时区）列，库里存的是 **UTC 墙钟时间**，
+    而调用方给的 since 是**本地时间**（人只会按本地日期想问题），
+    所以这里要按当前进程时区把它折算成 UTC，不能直接拿来比。
     """
     eng = get_engine()
+    where = ["is_mock = false"]
+    params: dict[str, Any] = {}
+    if since is not None:
+        if since.tzinfo is None:
+            # 裸时间按本地时区解释，再折成 UTC 去比库里的墙钟时间
+            off = datetime.now().astimezone().utcoffset() or timedelta(0)
+            since = since - off
+        else:
+            since = since.astimezone(timezone.utc).replace(tzinfo=None)
+        where.append("created_at >= :since")
+        params["since"] = since
+    if model:
+        where.append("model_name = :model")
+        params["model"] = model
+    cond = " AND ".join(where)
+
     with eng.connect() as conn:
         rows = conn.execute(
             text(
-                """
+                f"""
                 SELECT verdict, gt_verdict, COUNT(*) AS n
                 FROM inspection
                 WHERE gt_verdict IS NOT NULL
-                  AND is_mock = false
+                  AND {cond}
                 GROUP BY verdict, gt_verdict
                 """
-            )
+            ),
+            params,
         ).all()
         lat_rows = conn.execute(
-            text("SELECT latency_ms FROM inspection WHERE is_mock = false")
+            text(f"SELECT latency_ms FROM inspection WHERE {cond}"), params
         ).all()
         total = conn.execute(
-            text("SELECT COUNT(*) FROM inspection WHERE is_mock = false")
+            text(f"SELECT COUNT(*) FROM inspection WHERE {cond}"), params
         ).scalar_one()
         excluded_mock = conn.execute(
             text("SELECT COUNT(*) FROM inspection WHERE is_mock = true")
@@ -461,6 +490,11 @@ def report_summary() -> dict[str, Any]:
         "total_inspections": int(total),
         "excluded_mock": int(excluded_mock),
         "labeled": labeled,
+        # 口径必须跟着数字一起返回。只给数字不给口径，等于让人拿错数据下结论。
+        "filters": {
+            "since": since.isoformat(sep=" ", timespec="seconds") if since else None,
+            "model": model,
+        },
         "confusion": {"tp": tp, "fn": fn, "fp": fp, "tn": tn},
         "miss_rate_pct": round(fn / pos * 100, 2) if pos else None,
         "overkill_rate_pct": round(fp / neg * 100, 2) if neg else None,

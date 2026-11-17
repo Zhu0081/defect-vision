@@ -245,3 +245,23 @@ def test_defect_polygon_roundtrip(client):
         _sql("SELECT polygon FROM defect_item WHERE inspection_id = :i"), {"i": iid}
     ).all()
     assert any(r[0] and r[0].lstrip().startswith("[[") for r in raw)
+
+
+def test_report_carries_its_scope(client):
+    """统计必须把口径一起返回。
+
+    为什么值得一条测试：同一份库，全历史是「漏检 19.39%」，
+    只看当前模型上线后是「漏检 0%」。数字本身不会说话，口径才会。
+    """
+    body = client.get("/report").json()
+    assert body["filters"] == {"since": None, "model": None}
+
+    # 一个远在未来的 since：什么都筛不出来，而且必须是干干净净的 0，不是 500
+    empty = client.get("/report?since=2999-01-01").json()
+    assert empty["total_inspections"] == 0
+    assert empty["labeled"] == 0
+    assert empty["miss_rate_pct"] is None
+    assert empty["filters"]["since"] is not None
+
+    # 写错的日期要 400，不能静默当成「不过滤」
+    assert client.get("/report?since=abc").status_code == 400

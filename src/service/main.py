@@ -306,6 +306,26 @@ def backfill_gt() -> dict:
 
 
 @app.get("/report", tags=["统计"])
-def report() -> dict:
-    """混淆矩阵 + 漏检率/过杀率 + 节拍分位数 —— 产线要看的就是这几个数。"""
-    return db.report_summary()
+def report(since: str | None = None, model: str | None = None) -> dict:
+    """混淆矩阵 + 漏检率/过杀率 + 节拍分位数 —— 产线要看的就是这几个数。
+
+    两个可选过滤，回答「这个成绩是谁的」：
+
+        /report                          全历史（默认）
+        /report?since=2026-11-14         只要这天之后（按**本地时间**理解）
+        /report?model=onnx:best.onnx     只要这个模型跑的
+
+    为什么要这个：库里什么时期的记录都有。换模型前留着的失败样本
+    会一直算在当前模型头上 —— 实测全历史漏检 19.39%，
+    但只看当前模型上线后的记录是 0%。数字必须带口径才有意义。
+    """
+    since_dt = None
+    if since:
+        try:
+            since_dt = datetime.fromisoformat(since)
+        except ValueError:
+            raise HTTPException(
+                status_code=400,
+                detail="since 格式不对，用 2026-11-14 或 2026-11-14T08:00:00",
+            ) from None
+    return db.report_summary(since=since_dt, model=model or None)
