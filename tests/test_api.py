@@ -195,3 +195,53 @@ def test_ai_report_is_cached(client):
 
 def test_ai_report_unknown_id(client):
     assert client.post("/records/999999/report").status_code == 404
+
+
+def test_defect_polygon_roundtrip(client):
+    """轮廓必须能存进去再原样查回来。
+
+    为什么单独测：MockDetector 不产出 polygon，走 /detect 测不到这条路径。
+    而真模型产出的轮廓如果不落库，历史记录就只能重算一遍（P1-4 的问题）。
+    """
+    from src.service import db
+
+    poly = [[0.1, 0.2], [0.3, 0.2], [0.3, 0.4], [0.1, 0.4]]
+    iid = db.save_inspection(
+        batch_id="B_POLY_TEST",
+        filename="card_p001_scratch_001.jpg",
+        image_path="x.jpg",
+        part_id="001",
+        light="side",
+        model_name="test",
+        is_mock=False,
+        verdict="ng",
+        n_defects=1,
+        max_score=0.9,
+        latency_ms=12.0,
+        items=[
+            {
+                "label": "scratch", "score": 0.9,
+                "x1": 0.1, "y1": 0.2, "x2": 0.3, "y2": 0.4,
+                "polygon": poly,
+            },
+            {   # 没有轮廓的缺陷：库里存 NULL，接口统一成 []
+                "label": "stain", "score": 0.5,
+                "x1": 0.5, "y1": 0.5, "x2": 0.6, "y2": 0.6,
+                "polygon": [],
+            },
+        ],
+    )
+
+    got = client.get(f"/records/{iid}").json()
+    by_label = {it["label"]: it for it in got["items"]}
+    assert by_label["scratch"]["polygon"] == poly
+    assert by_label["stain"]["polygon"] == []
+
+    # 存成 JSON 文本（能被 json 解析回来），不是 Python repr 那种单引号串
+    from sqlalchemy import text as _sql
+
+    conn = db.get_engine().connect()
+    raw = conn.execute(
+        _sql("SELECT polygon FROM defect_item WHERE inspection_id = :i"), {"i": iid}
+    ).all()
+    assert any(r[0] and r[0].lstrip().startswith("[[") for r in raw)

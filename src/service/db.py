@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import PurePath
 from datetime import datetime, timezone
 from typing import Any
@@ -113,6 +114,10 @@ MIGRATIONS: list[tuple[str, str, str]] = [
     ("inspection", "ai_report", "ai_report TEXT"),
     ("inspection", "ai_report_source", "ai_report_source VARCHAR(16)"),
     ("inspection", "ai_report_at", "ai_report_at VARCHAR(32)"),
+    # 缺陷轮廓。存成一段 JSON 文本（[[x,y],...] 归一化坐标）而不是拆成多行表：
+    # 轮廓点数不固定（本项目 20~30 点），拆表要么一行多点、要么多行拼装，
+    # 两种都比"一整段 JSON 跟着这条缺陷一起读"更麻烦。TEXT 在两端都能存。
+    ("defect_item", "polygon", "polygon TEXT"),
 ]
 
 
@@ -194,8 +199,9 @@ def save_inspection(
             conn.execute(
                 text(
                     """
-                    INSERT INTO defect_item (inspection_id, label, score, x1, y1, x2, y2)
-                    VALUES (:iid, :label, :score, :x1, :y1, :x2, :y2)
+                    INSERT INTO defect_item
+                        (inspection_id, label, score, x1, y1, x2, y2, polygon)
+                    VALUES (:iid, :label, :score, :x1, :y1, :x2, :y2, :polygon)
                     """
                 ),
                 [
@@ -207,6 +213,10 @@ def save_inspection(
                         "y1": it["y1"],
                         "x2": it["x2"],
                         "y2": it["y2"],
+                        # 没有轮廓就存 NULL，不要存 "[]" —— 空数组和下过轮廓是两件事
+                        "polygon": json.dumps(it["polygon"], ensure_ascii=False)
+                        if it.get("polygon")
+                        else None,
                     }
                     for it in items
                 ],
@@ -242,7 +252,7 @@ def get_inspection(iid: int) -> dict | None:
         items = conn.execute(
             text(
                 """
-                SELECT label, score, x1, y1, x2, y2
+                SELECT label, score, x1, y1, x2, y2, polygon
                 FROM defect_item
                 WHERE inspection_id = :iid
                 ORDER BY score DESC
@@ -251,8 +261,30 @@ def get_inspection(iid: int) -> dict | None:
             {"iid": iid},
         ).mappings().all()
     out = dict(head)
-    out["items"] = [dict(r) for r in items]
+    out["items"] = [_item_row(r) for r in items]
     return out
+
+
+def _item_row(r) -> dict:
+    """把 defect_item 的一行转成接口要的形状：polygon 从 JSON 文本还原成列表。
+
+    库里用 NULL 表示「这条记录没存过轮廓」（老数据都是这样），
+    接口对外统一成 []，前端和 C# 就不用区分 null 和空数组。
+    """
+    d = dict(r)
+    # 接口和前端都用 box 这个四元组；库里拆成四列是为了能按坐标查/建索引
+    if "x1" in d:
+        d["box"] = [d["x1"], d["y1"], d["x2"], d["y2"]]
+    raw = d.get("polygon")
+    if raw:
+        try:
+            d["polygon"] = json.loads(raw)
+        except (TypeError, ValueError):
+            # 存坏了就当没有轮廓，不要让整条记录 500
+            d["polygon"] = []
+    else:
+        d["polygon"] = []
+    return d
 
 
 def save_ai_report(iid: int, report_text: str, source: str) -> None:

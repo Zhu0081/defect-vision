@@ -25,6 +25,7 @@ from __future__ import annotations
 import argparse
 import csv
 import sys
+from datetime import datetime
 from pathlib import Path
 
 import matplotlib
@@ -46,6 +47,11 @@ GRID = [round(0.05 * i, 2) for i in range(1, 20)]
 # 1280 训练 + 640 推理 = 把模型的「视力」直接砍一半，指标会假性暴跌。
 INFER_SIZE = 1280
 _INFER_SIZE = INFER_SIZE
+
+# 默认权重。报告里必须原样回显这个路径 ——
+# 之前模板把路径写死成 baseline_v1，导致 v4 的报告也印着 baseline_v1，
+# 两次扫描差 24 个百分点却查不出是哪个模型跑的。
+DEFAULT_MODEL = ROOT / "runs" / "segment" / "baseline_v1" / "weights" / "best.pt"
 
 
 def collect(splits: list[str], conf_floor: float) -> list[dict]:
@@ -87,7 +93,7 @@ _FORCE_MODEL: Path | None = None
 
 def load_model(path: Path | None = None):
     global _MODEL, _MODEL_PATH
-    path = path or (ROOT / "runs" / "segment" / "baseline_v1" / "weights" / "best.pt")
+    path = path or DEFAULT_MODEL
     if _MODEL is None or _MODEL_PATH != path:
         from ultralytics import YOLO
 
@@ -172,21 +178,35 @@ def plot(rows: list[dict], items: list[dict], best: dict, out: Path) -> None:
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--splits", nargs="+", default=["val", "test"])
+    ap.add_argument(
+        "--splits", nargs="+", default=["val"],
+        help="默认只用 val。⚠ 把 test 加进来选阈值 = 拿考试卷调参，"
+             "之后 test 上的成绩就不再是独立指标（2026-11-17 审计发现的问题）",
+    )
     ap.add_argument("--max-miss", type=float, default=5.0, help="漏检率上限 %%，默认 5")
     ap.add_argument("--conf-floor", type=float, default=0.01)
     ap.add_argument("--imgsz", type=int, default=INFER_SIZE,
                     help=f"推理尺寸，必须和训练一致，默认 {INFER_SIZE}")
     ap.add_argument("--tag", default="", help="输出文件名后缀，比如 val 只跑验证集时用 --tag _val")
     ap.add_argument("--model", default="",
-                    help="权重路径，默认 runs/segment/baseline_v1/weights/best.pt")
+                    help="权重路径（相对项目根），默认 runs/segment/baseline_v1/weights/best.pt")
     args = ap.parse_args()
 
     global _FORCE_MODEL, _INFER_SIZE
-    if args.model:
-        _FORCE_MODEL = ROOT / args.model
+    # 无论给不给 --model，都把「实际要用的那个路径」显式定下来并回显，
+    # 这样报告里的模型路径永远等于真正加载的权重。
+    _FORCE_MODEL = ROOT / args.model if args.model else DEFAULT_MODEL
     _INFER_SIZE = args.imgsz
+
+    if "test" in args.splits:
+        print("⚠ 警告：--splits 里包含 test。用 test 选阈值会让 test 失去独立性。")
+        print("   正确做法：先在 val 上选阈值，再单独对 test 只测一次。\n")
+
+    run_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    model_disp = _FORCE_MODEL.relative_to(ROOT).as_posix() if _FORCE_MODEL.is_relative_to(ROOT) else str(_FORCE_MODEL)
+    print(f"模型     {model_disp}")
     print(f"推理尺寸 {_INFER_SIZE}（必须等于训练尺寸）")
+    print(f"集合     {','.join(args.splits)}")
 
     tag = args.tag
     out_csv = ROOT / "reports" / f"threshold_sweep{tag}.csv"
@@ -230,13 +250,19 @@ def main() -> None:
     out_md.write_text(
         f"""# 阈值扫描结论
 
-- 样本：{len(items)} 张（缺陷 {n_ng} 张、良品 {n_ok} 张），集合 {', '.join(args.splits)}
-- 模型：`runs/segment/baseline_v1/weights/best.pt`
+- 生成时间：{run_at}
+- 模型：`{model_disp}`
+- 推理尺寸：**{_INFER_SIZE}**
+- 集合：{', '.join(args.splits)}（共 {len(items)} 张：缺陷 {n_ng} 张、良品 {n_ok} 张）
 - 推荐阈值：**{best['t']:.2f}**
 - 该阈值下：漏检 **{best['miss']:.0f}%**，过杀 **{best['over']:.0f}%**，准确率 {best['acc']:.0f}%
 
 选阈值的规则：漏检率不超过 {args.max_miss:.0f}% 的前提下，取过杀率最低。
 理由：漏检的代价是缺陷流到客户手上，过杀的代价是多看两眼，两者不对等。
+
+> 口径提醒：上面所有指标都是在 `{', '.join(args.splits)}` 上算出来的。
+> {'⚠ 本次包含 test —— test 已参与选阈值，因此不能当作独立泛化性能。' if 'test' in args.splits else 'test 未参与选阈值，可单独作为独立验证。'}
+> 复现命令：`python src/eval/threshold_sweep.py --splits {' '.join(args.splits)} --imgsz {_INFER_SIZE} --model {model_disp}{f" --tag {tag}" if tag else ""}`
 
 ![阈值曲线](figures/threshold_curve{tag}.png)
 """,

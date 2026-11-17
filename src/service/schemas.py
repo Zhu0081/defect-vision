@@ -51,6 +51,22 @@ class HealthResponse(BaseModel):
     upload_dir: str
 
 
+class RecordItem(BaseModel):
+    """单条缺陷明细（历史记录详情里的每一行）。
+
+    之前 RecordOut 里没有这个字段，于是 /records/{id} 把 defect_item 查出来又被
+    response_model 过滤掉了 —— 前端拿不到框，历史记录只能显示原图。
+    """
+
+    label: str
+    score: float
+    box: list[float] = Field(..., min_length=4, max_length=4,
+                             description="归一化坐标 [x1, y1, x2, y2]")
+    # 老数据没有轮廓，统一返回 []（库里是 NULL）
+    polygon: list[list[float]] = Field(default_factory=list,
+                                       description="归一化多边形顶点，没有就是 []")
+
+
 class RecordOut(BaseModel):
     id: int
     batch_id: str
@@ -87,6 +103,8 @@ class RecordOut(BaseModel):
     ai_report: str | None = None
     ai_report_source: str | None = None
     ai_report_at: str | None = None
+    # 缺陷明细：历史记录要能回放出当时的框和轮廓，不能每次重新推理一遍
+    items: list[RecordItem] = Field(default_factory=list)
 
 
 class AiReportOut(BaseModel):
