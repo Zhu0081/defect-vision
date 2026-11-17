@@ -121,6 +121,36 @@ def test_stats_and_report(client):
     assert "confusion" in r.json()
 
 
+def test_report_excludes_mock_records(client):
+    """回归测试：Mock 记录绝不能进统计。
+
+    2026-11-17 的审计发现 —— 库里有 is_mock 列、写入也确实写了，
+    但 /report 和 /stats 的 SQL 压根没过滤它。后果是：
+    在没放模型的机器上跑一次演示，漏检率/过杀率/节拍全被假数据污染，
+    而且看不出被污染过。
+
+    测试环境本身就是 MockDetector（conftest 把模型路径指到不存在的文件），
+    所以这里每做一次检测，就是在往库里塞一条 is_mock=true 的记录。
+    正确的行为是：这些记录全部被排除，只计入 excluded_mock。
+    """
+    png = _png_bytes()
+    before = client.get("/report").json()
+
+    r = client.post("/detect", files={"file": ("m.png", png, "image/png")})
+    assert r.status_code == 200
+
+    after = client.get("/report").json()
+    # 真模型记录数没变
+    assert after["total_inspections"] == before["total_inspections"]
+    # Mock 记录数 +1（且没有进 labeled）
+    assert after["excluded_mock"] == before["excluded_mock"] + 1
+    assert after["labeled"] == 0 or after["labeled"] == before["labeled"]
+
+    # /stats 也不许出现 Mock 造成的行数变化
+    stats_before = client.get("/stats").json()
+    assert sum(row["n"] for row in stats_before) == after["total_inspections"]
+
+
 def test_ai_report_falls_back_to_template(client):
     """没配 API Key 时，AI 报告必须降级成模板，而不是 500。
 

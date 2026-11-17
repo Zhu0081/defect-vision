@@ -287,7 +287,18 @@ def save_ai_report(iid: int, report_text: str, source: str) -> None:
 
 
 def stats_by_light() -> list[dict]:
-    """按光源聚合 —— 这就是那张「光源 × 模型」对比表的数据来源。"""
+    """按光源聚合 —— 这就是那张「光源 × 模型」对比表的数据来源。
+
+    两个必须记住的点：
+    1. `WHERE is_mock = false` —— 假数据不能进统计，否则演示机上一次 Mock 就会把
+       「光源对比」污染成假结论。
+    2. `CAST(AVG(latency_ms) AS NUMERIC)` —— PostgreSQL 没有
+       `round(double precision, integer)`，latency_ms 是 DOUBLE PRECISION，
+       不先转 NUMERIC 会直接
+       `UndefinedFunction: function round(double precision, integer) does not exist`。
+       ⚠ 必须写 `CAST(x AS NUMERIC)`，**不能写 `x::numeric`** —— 后者是 PG 独有语法，
+       SQLite 报 `unrecognized token: ":"`，测试立刻就炸。这一条已经踩过两次。
+    """
     with get_engine().connect() as conn:
         rows = conn.execute(
             text(
@@ -295,9 +306,10 @@ def stats_by_light() -> list[dict]:
                 SELECT light,
                        COUNT(*)                                   AS n,
                        SUM(CASE WHEN verdict = 'ng' THEN 1 ELSE 0 END) AS n_ng,
-                       ROUND(AVG(n_defects), 2)                   AS avg_defects,
-                       ROUND(AVG(latency_ms), 1)                  AS avg_latency_ms
+                       ROUND(CAST(AVG(n_defects) AS NUMERIC), 2)   AS avg_defects,
+                       ROUND(CAST(AVG(latency_ms) AS NUMERIC), 1)  AS avg_latency_ms
                 FROM inspection
+                WHERE is_mock = false
                 GROUP BY light
                 ORDER BY n DESC
                 """
@@ -379,12 +391,20 @@ def report_summary() -> dict[str, Any]:
                 SELECT verdict, gt_verdict, COUNT(*) AS n
                 FROM inspection
                 WHERE gt_verdict IS NOT NULL
+                  AND is_mock = false
                 GROUP BY verdict, gt_verdict
                 """
             )
         ).all()
-        lat_rows = conn.execute(text("SELECT latency_ms FROM inspection")).all()
-        total = conn.execute(text("SELECT COUNT(*) FROM inspection")).scalar_one()
+        lat_rows = conn.execute(
+            text("SELECT latency_ms FROM inspection WHERE is_mock = false")
+        ).all()
+        total = conn.execute(
+            text("SELECT COUNT(*) FROM inspection WHERE is_mock = false")
+        ).scalar_one()
+        excluded_mock = conn.execute(
+            text("SELECT COUNT(*) FROM inspection WHERE is_mock = true")
+        ).scalar_one()
 
     tp = fn = fp = tn = 0
     for verdict, gt, n in rows:
@@ -407,6 +427,7 @@ def report_summary() -> dict[str, Any]:
 
     return {
         "total_inspections": int(total),
+        "excluded_mock": int(excluded_mock),
         "labeled": labeled,
         "confusion": {"tp": tp, "fn": fn, "fp": fp, "tn": tn},
         "miss_rate_pct": round(fn / pos * 100, 2) if pos else None,
