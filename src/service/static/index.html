@@ -52,6 +52,13 @@
   .frame{position:relative; display:inline-block; max-width:100%; line-height:0}
   .frame img{display:block; max-width:100%; max-height:58vh; margin:0 auto}
   .overlay{position:absolute; inset:0}
+  /* 多边形轮廓层：viewBox 用原图像素、preserveAspectRatio=none 让 SVG 随图拉伸，
+     再用 non-scaling-stroke 保证线宽在任何缩放下都是 2px（否则会被拉成 0.5px 或 8px） */
+  .ovl{position:absolute; inset:0; width:100%; height:100%; pointer-events:none; overflow:visible}
+  .ovl polygon{
+    fill:rgba(34,211,238,.20); stroke:#22d3ee; stroke-width:2;
+    vector-effect:non-scaling-stroke; stroke-linejoin:round;
+  }
   .box{
     position:absolute; border:2px solid #22d3ee;
     box-shadow:0 0 0 1px rgba(0,0,0,.45) inset;
@@ -340,10 +347,29 @@ function render(j){
   $('s-ms').textContent    = j.latency_ms.toFixed(0);
   $('s-model').textContent = j.is_mock ? 'Mock' : j.model_name.replace(/^onnx:/,'');
 
-  // 框
+  // 框 + 多边形轮廓
   const ov = $('overlay');
   ov.innerHTML = '';
+
+  // 轮廓层：坐标本身都是 0~1 的归一化值，所以 viewBox 固定用 1000×1000，
+  // 点 = 归一化 × 1000；preserveAspectRatio=none 让 SVG 正好铺满图片框。
+  // 这样不依赖 img.naturalWidth（图片没加载完时它是 0，会导致多边形缩成一点）。
+  const NS = 'http://www.w3.org/2000/svg';
+  const S = 1000;
+  const svg = document.createElementNS(NS, 'svg');
+  svg.setAttribute('class', 'ovl');
+  svg.setAttribute('viewBox', '0 0 ' + S + ' ' + S);
+  svg.setAttribute('preserveAspectRatio', 'none');
+  ov.appendChild(svg);
+
   j.items.forEach(d => {
+    if (d.polygon && d.polygon.length >= 3) {
+      const pg = document.createElementNS(NS, 'polygon');
+      pg.setAttribute('points', d.polygon.map(p =>
+        (p[0] * S).toFixed(1) + ',' + (p[1] * S).toFixed(1)).join(' '));
+      svg.appendChild(pg);
+    }
+
     const [x1,y1,x2,y2] = d.box;
     const el = document.createElement('div');
     el.className = 'box';
