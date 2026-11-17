@@ -10,9 +10,9 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class DefectItem(BaseModel):
@@ -66,6 +66,23 @@ class RecordOut(BaseModel):
     # 而 SQLite 是动态类型，同样的列返回的是字符串，pydantic 也能解析，
     # 所以 datetime 这个声明两种数据库都吃得下。
     created_at: datetime | None = None
+
+    @field_validator("created_at")
+    @classmethod
+    def _created_at_is_utc(cls, v: datetime | None) -> datetime | None:
+        """把数据库里的「裸 UTC 墙钟时间」标上 UTC 时区。
+
+        inspections.created_at 是 `TIMESTAMP`（不带时区）列，默认值 `CURRENT_TIMESTAMP`
+        在容器里按 UTC 落库，所以存进去的是 UTC 的墙钟时间，但**没有时区标记**。
+        原样返回的话 FastAPI 会序列化成 "2026-11-17T05:59:02"，
+        浏览器和 C# 都会按「本地时间」去解析 → 显示比实际慢 8 小时。
+
+        这里补上 UTC，序列化结果变成 "2026-11-17T05:59:02+00:00"，
+        前端才能换算成本地时间显示。已经带时区的值原样返回，不覆盖。
+        """
+        if v is None:
+            return None
+        return v if v.tzinfo is not None else v.replace(tzinfo=timezone.utc)
     # 报告字段可空：还没生成过就是 None，前端据此决定「显示生成按钮」还是「显示报告」
     ai_report: str | None = None
     ai_report_source: str | None = None

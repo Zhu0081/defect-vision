@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Drawing;
 using System.Drawing.Imaging;
@@ -487,7 +487,14 @@ namespace DefectVision.UI
                         string verdict = GetStr(r, "verdict");
                         string n = r.GetProperty("n_defects").GetInt32().ToString();
                         string created = GetStr(r, "created_at");
-                        string when = created.Length >= 19 ? created.Substring(5, 14) : created;
+                        // 接口给的是带 +00:00 的 UTC 时间。原样截断显示的就是 UTC，会慢 8 小时，
+                        // 所以先解析再转本地时区；解析不了就退回原来的截断写法。
+                        string when = created;
+                        if (DateTimeOffset.TryParse(created, CultureInfo.InvariantCulture,
+                                DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out var dt))
+                            when = dt.ToLocalTime().ToString("MM-dd HH:mm", CultureInfo.InvariantCulture);
+                        else if (created.Length >= 19)
+                            when = created.Substring(5, 14).Replace('T', ' ');
                         lstHist.Items.Add(string.Format("#{0}  {1}  {2}处  {3}",
                             id, verdict == "ng" ? "NG" : "OK", n, when));
                     }

@@ -42,6 +42,11 @@ services:
       # 容器里的 localhost 指的是容器自己
       DV_DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@db:5432/${POSTGRES_DB:-defect}
       DV_DEFAULT_CONF: "0.25"
+      # 应用容器用本地时区：批次号 B20261117... 和「按日期分目录」用的是 datetime.now()，
+      # 容器默认 UTC 会让这两个给人看的标签慢 8 小时。
+      # 注意：db 容器**不要**设 TZ —— inspections.created_at 靠数据库默认值写入，
+      # 必须保持 UTC，再由 schemas.py 的 validator 标上 UTC 让前端换算。
+      TZ: Asia/Shanghai
       # AI 报告用的三个变量：从宿主机 .env 透传进容器。
       # 这里**不写默认值**，因为 key 绝不该有默认值；
       # 没配就留空，服务会自动降级成规则模板。

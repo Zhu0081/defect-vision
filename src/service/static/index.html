@@ -229,6 +229,18 @@ function esc(s){
   return String(s).replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
 }
 
+// 后端存的是 UTC，接口现在带 "+00:00"，交给浏览器换成你电脑的本地时间显示。
+// 为什么不能直接 slice 字符串：那样显示的是 UTC，会慢 8 小时。
+// 兼容旧数据：万一拿到不带时区的字符串，手动补个 Z 当成 UTC（别让它按本地时间解析）。
+function fmtLocal(s){
+  if(!s) return '';
+  const iso = /([Zz]|[+-]\d{2}:?\d{2})$/.test(s) ? s : s + 'Z';
+  const d = new Date(iso);
+  if(isNaN(d)) return String(s).slice(5,16).replace('T',' ');
+  const p = n => String(n).padStart(2,'0');
+  return p(d.getMonth()+1) + '-' + p(d.getDate()) + ' ' + p(d.getHours()) + ':' + p(d.getMinutes());
+}
+
 // 极简 markdown：只认 ### 标题和 **加粗**。
 // 为什么不引 marked.js：一个 30KB 的库只为渲染四个小标题，不划算。
 function mdToHtml(md){
@@ -416,7 +428,7 @@ async function loadHistory(){  try{
       + '<div class="meta"><b class="' + (r.verdict || '') + '">'
       + ((r.verdict === 'ok') ? 'OK 良品' : 'NG 不良') + ' · ' + (r.n_defects ?? 0) + ' 处</b>'
       + '#' + r.id + ' · ' + (r.light || '—') + '<br>'
-      + (r.created_at ? String(r.created_at).slice(5,16).replace('T',' ') : '')
+      + fmtLocal(r.created_at)
       + '</div></a>').join('');
   }catch(e){ /* 历史失败不影响主流程 */ }
 }

@@ -15,7 +15,7 @@
 from __future__ import annotations
 
 from pathlib import PurePath
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 from sqlalchemy import create_engine, text
@@ -279,7 +279,8 @@ def save_ai_report(iid: int, report_text: str, source: str) -> None:
             {
                 "t": report_text,
                 "s": source,
-                "at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                # 统一按 UTC 存并带上时区标记：前端拿去做本地化才有依据。
+                "at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
                 "iid": iid,
             },
         )
