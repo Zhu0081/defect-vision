@@ -83,6 +83,11 @@
   }
   button:hover:not(:disabled){background:#115e59}
   button:disabled{background:#94a3b8; cursor:not-allowed}
+  /* 为什么要多这一条：`button:disabled` 的优先级(0,1,1)高于 `.ai-btn`(0,1,0)，
+     所以 AI 报告按钮一旦被禁用过，重新启用后背景仍按灰色规则走，
+     实测截图里一直是灰的，看起来像没启用。用类名明确表达"关闭态"，
+     优先级(0,2,0)压过 `.ai-btn`，启用时把类去掉就一定恢复深色。 */
+  .ai-btn.is-off{background:#94a3b8; cursor:not-allowed}
   .msg{margin-top:10px; font-size:13px; color:var(--muted); min-height:18px}
   .msg.err{color:var(--ng)}
 
@@ -229,7 +234,7 @@
       <div class="empty">检测后这里会列出每个缺陷的位置和置信度</div>
     </div>
 
-    <button id="ai" class="ai-btn" disabled>生成 AI 报告</button>
+    <button id="ai" class="ai-btn is-off" disabled>生成 AI 报告</button>
     <div id="ai-box" class="ai-box" style="display:none"></div>
 
     <details>
@@ -310,6 +315,7 @@ async function generateReport(){
   if(lastId == null) return;
   const btn = $('ai'), box = $('ai-box');
   btn.disabled = true;
+  btn.classList.add('is-off');
   btn.textContent = '生成中…';
   box.style.display = 'block';
   box.innerHTML = '<div class="empty">正在生成报告…</div>';
@@ -328,6 +334,7 @@ async function generateReport(){
     box.innerHTML = '<div class="empty">生成失败：' + esc(e.message) + '</div>';
   }finally{
     btn.disabled = false;
+    btn.classList.remove('is-off');
     btn.textContent = '重新生成报告';
   }
 }
@@ -477,11 +484,7 @@ function render(j, opts){
   lastId = j.inspection_id ?? j.id;
   const btn = $('ai');
   btn.disabled = false;
-  // 显式写一次背景：`button:disabled{background:#94a3b8}` 是全局样式，
-  // 有些浏览器（尤其无 GPU 的 headless 截图）在只改 disabled 属性时不会重绘这一块，
-  // 截图里就还是灰的，看起来像没启用。写内联样式能强制失效缓存。
-  btn.style.background = '#1e293b';
-  btn.style.cursor = 'pointer';
+  btn.classList.remove('is-off');
   btn.textContent = '生成 AI 报告';
   $('ai-box').style.display = 'none';
   $('ai-box').innerHTML = '';
