@@ -160,12 +160,19 @@
   .card{
     border:1px solid var(--line); border-radius:11px; overflow:hidden;
     background:#fff; text-decoration:none; color:inherit; display:block;
+    cursor:pointer; transition:border-color .12s, box-shadow .12s;
   }
+  .card:hover{border-color:#94a3b8; box-shadow:0 1px 6px rgba(15,23,42,.08)}
   .card img{width:100%; height:96px; object-fit:cover; background:#e2e8f0; display:block}
   .card .meta{padding:8px 9px; font-size:11.5px; color:var(--muted); line-height:1.5}
   .card .meta b{display:block; font-size:13px; margin-bottom:2px}
   .card .meta b.ok{color:var(--ok)}
   .card .meta b.ng{color:var(--ng)}
+  .card .raw{
+    display:block; padding:0 9px 8px; font-size:11px; color:#0369a1;
+    text-decoration:none; border-top:0;
+  }
+  .card .raw:hover{text-decoration:underline}
 </style>
 </head>
 <body>
@@ -395,16 +402,23 @@ $('go').onclick = async () => {
   $('go').disabled = false;
 };
 
-function render(j){
+function render(j, opts){
+  // opts.replay = true 表示这是「历史回放」，数据来自数据库，不是刚跑出来的。
+  // 区别只在文案上：历史记录里没有「本次判定阈值」这种东西，写了就是编。
+  const replay = !!(opts && opts.replay);
   const v = $('verdict');
   v.className = 'verdict ' + j.verdict;
   v.innerHTML = (j.verdict === 'ok' ? 'OK 良品' : 'NG 不良')
-              + '<small>' + j.n_defects + ' 处缺陷 · 判定阈值 ' + (+$('conf').value).toFixed(2) + '</small>';
+              + '<small>' + j.n_defects + ' 处缺陷 · '
+              + (replay ? '历史记录（未重新推理）'
+                        : '判定阈值 ' + (+$('conf').value).toFixed(2)) + '</small>';
 
   $('s-n').textContent     = j.n_defects;
   $('s-max').textContent   = j.max_score ? j.max_score.toFixed(3) : '–';
   $('s-ms').textContent    = j.latency_ms.toFixed(0);
-  $('s-model').textContent = j.is_mock ? 'Mock' : j.model_name.replace(/^onnx:/,'');
+  $('s-model').textContent = replay
+    ? ((j.model_name || '—').replace(/^onnx:/, '') + (j.is_mock ? ' (Mock)' : ''))
+    : (j.is_mock ? 'Mock' : j.model_name.replace(/^onnx:/,''));
 
   // 框 + 多边形轮廓
   const ov = $('overlay');
@@ -443,7 +457,11 @@ function render(j){
   // 明细表
   const wrap = $('items-wrap');
   if(!j.items.length){
-    wrap.innerHTML = '<div class="empty">没有检出缺陷 —— 判定为良品</div>';
+    // 兼容老数据：detect 那版没把明细写库，所以有些记录 n_defects>0 但 items 是空的。
+    // 这时候不能显示「没有检出缺陷」——那是在撒谎。
+    wrap.innerHTML = j.n_defects > 0
+      ? '<div class="empty">这条记录没有保存缺陷明细（老数据），只能看图。</div>'
+      : '<div class="empty">没有检出缺陷 —— 判定为良品</div>';
   }else{
     wrap.innerHTML =
       '<table><thead><tr><th>缺陷</th><th class="num">置信度</th><th class="num">位置 (x1,y1,x2,y2)</th></tr></thead><tbody>'
@@ -456,9 +474,14 @@ function render(j){
   $('json').textContent = JSON.stringify(j, null, 2);
 
   // 每次新检测都重置报告区：否则你会把上一次的报告当成这一次的
-  lastId = j.inspection_id;
+  lastId = j.inspection_id ?? j.id;
   const btn = $('ai');
   btn.disabled = false;
+  // 显式写一次背景：`button:disabled{background:#94a3b8}` 是全局样式，
+  // 有些浏览器（尤其无 GPU 的 headless 截图）在只改 disabled 属性时不会重绘这一块，
+  // 截图里就还是灰的，看起来像没启用。写内联样式能强制失效缓存。
+  btn.style.background = '#1e293b';
+  btn.style.cursor = 'pointer';
   btn.textContent = '生成 AI 报告';
   $('ai-box').style.display = 'none';
   $('ai-box').innerHTML = '';
@@ -470,22 +493,48 @@ async function loadHistory(){  try{
     const box = $('hist');
     if(!rows.length){ box.innerHTML = '<div class="empty">还没有检测记录</div>'; return; }
     box.innerHTML = rows.map(r =>
-      '<a class="card" href="/records/' + r.id + '" target="_blank">'
+      '<div class="card" data-iid="' + r.id + '" title="点击回放这条记录（读数据库，不重新推理）">'
       + '<img src="/image/' + r.id + '" loading="lazy" alt="">'
       + '<div class="meta"><b class="' + (r.verdict || '') + '">'
       + ((r.verdict === 'ok') ? 'OK 良品' : 'NG 不良') + ' · ' + (r.n_defects ?? 0) + ' 处</b>'
       + '#' + r.id + ' · ' + (r.light || '—') + '<br>'
       + fmtLocal(r.created_at)
-      + '</div></a>').join('');
+      + '</div>'
+      + '<a class="raw" href="/records/' + r.id + '" target="_blank" '
+      + 'onclick="event.stopPropagation()">原始 JSON ↗</a></div>').join('');
+
+    // 点卡片 = 回放这条历史记录。不换页、不发 /detect、不产生新记录。
+    box.querySelectorAll('.card').forEach(el => {
+      el.addEventListener('click', () => replay(el.dataset.iid));
+    });
   }catch(e){ /* 历史失败不影响主流程 */ }
 }
-/* ---------- 回放：?auto=16 打开就自动用第 16 条记录的图跑一遍 ---------- */
+
+/* ---------- 回放：直接读数据库里存下来的结果，不重新推理 ---------- */
+// 改之前这里做的是：把 /image/16 取回来包成 File，再点「开始检测」→ 又跑一遍模型、
+// 又写一条新记录。看一次历史就多一条记录，统计也会被污染。
+// 现在只读 /records/{id}（框、轮廓都在里面），然后画到原图上。
 async function replay(iid){
   try{
-    const blob = await (await fetch('/image/' + iid)).blob();
-    setFile(new File([blob], 'replay_' + iid + '.jpg', {type:'image/jpeg'}));
-    $('go').click();
-  }catch(e){ $('msg').textContent = '回放失败：' + e; }
+    const resp = await fetch('/records/' + iid);
+    if(!resp.ok) throw new Error('HTTP ' + resp.status);
+    const rec = await resp.json();
+
+    // 换成历史图；picked 清空 + 禁用按钮，避免误点「开始检测」又把这张图跑一遍
+    picked = null;
+    $('file').value = '';
+    $('preview').src = '/image/' + iid;
+    $('stage').style.display = 'block';
+    $('overlay').innerHTML = '';
+    $('go').disabled = true;
+    $('msg').className = 'msg';
+    $('msg').textContent = '回放 #' + iid + ' · 读数据库，未调用推理 · 想检测新图请重新选图';
+
+    render(rec, {replay: true});
+  }catch(e){
+    $('msg').className = 'msg err';
+    $('msg').textContent = '回放失败：' + e;
+  }
 }
 
 /* ---------- 质检统计：漏检率 / 过杀率 ---------- */

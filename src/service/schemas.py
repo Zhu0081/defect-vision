@@ -83,6 +83,12 @@ class RecordOut(BaseModel):
     # 所以 datetime 这个声明两种数据库都吃得下。
     created_at: datetime | None = None
 
+    # 这两列 get_inspection() 用 SELECT * 本来就查出来了，只是以前没在 response_model 里声明，
+    # 被 FastAPI 静默过滤掉了 —— 结果网页回放历史时不知道自己看的是哪个模型跑出来的。
+    # 注意 list_inspections() 没查这两列，所以默认值必须是可空/可省，否则列表接口会 500。
+    model_name: str | None = None
+    is_mock: bool | None = None
+
     @field_validator("created_at")
     @classmethod
     def _created_at_is_utc(cls, v: datetime | None) -> datetime | None:
