@@ -48,12 +48,31 @@ def load(path: Path) -> ort.InferenceSession:
     return ort.InferenceSession(str(path), so, providers=["CPUExecutionProvider"])
 
 
-def infer(sess: ort.InferenceSession, x: np.ndarray, conf_thr: float) -> tuple[int, float]:
+def contract_of(sess: ort.InferenceSession) -> str:
+    """看输出形状判断是哪种导出。取错了置信度列，报出来的数就全是假的。
+
+    带 NMS:  output0 = [1, 300, 38]（4 框 + 1 置信度 + 1 类别 + 32 掩码系数）
+    不带 NMS: output0 = [1, 40, 33600]（前 4 行框、4:8 类分数、后 32 行掩码系数）
+    """
+    shape = sess.get_outputs()[0].shape
+    if len(shape) != 3:
+        raise SystemExit(f"看不懂的输出形状 {shape}")
+    return "nms" if shape[1] == 300 else "nonms"
+
+
+def infer(sess: ort.InferenceSession, x: np.ndarray, conf_thr: float,
+          contract: str | None = None) -> tuple[int, float]:
     name = sess.get_inputs()[0].name
-    out = sess.run(None, {name: x[None]})[0][0]  # (300, 38)
-    if out.size == 0:
+    out = sess.run(None, {name: x[None]})[0]
+    contract = contract or contract_of(sess)
+    if contract == "nms":
+        arr = out[0]                      # (300, 38)
+        confs = arr[:, COL_CONF] if arr.size else np.zeros(0, dtype=np.float32)
+    else:
+        arr = out[0]                      # (40, 33600)；这里别再写 out[0][0]，那是 33600 个数的 1-D
+        confs = arr[4:8].max(axis=0)      # 每列取 4 个类别里的最大值
+    if confs.size == 0:
         return 0, 0.0
-    confs = out[:, COL_CONF]
     keep = confs >= conf_thr
     n = int(keep.sum())
     return n, (float(confs[keep].max()) if n else 0.0)
@@ -73,12 +92,16 @@ def main() -> int:
     int8 = load(Path(args.int8))
 
     rows = []
+    c32, c8 = contract_of(fp32), contract_of(int8)
+    print(f"  契约：FP32={c32}  INT8={c8}")
+    if c32 != c8:
+        print("  ⚠ 两个模型的输出契约不一致，下面的「同一位置」对比没有意义")
     for split in args.splits:
         for img_path in sorted((ROOT / "data" / "yolo" / "images" / split).glob("*.jpg")):
             img = cv2.imread(str(img_path))
             x = letterbox(img, args.imgsz)
-            n_f, c_f = infer(fp32, x, args.conf)
-            n_q, c_q = infer(int8, x, args.conf)
+            n_f, c_f = infer(fp32, x, args.conf, c32)
+            n_q, c_q = infer(int8, x, args.conf, c8)
             rows.append({
                 "split": split,
                 "file": img_path.name,

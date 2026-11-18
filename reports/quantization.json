@@ -1,6 +1,6 @@
 {
   "env": {
-    "run_at": "2026-11-18 20:31:17",
+    "run_at": "2026-11-18 20:58:33",
     "onnxruntime": "1.31.1",
     "python": "3.11.9",
     "cpu_logical": 20
@@ -30,19 +30,20 @@
         ]
       ],
       "contract": "nonms",
-      "p50_ms": 202.94,
-      "p95_ms": 251.63,
-      "mean_ms": 206.98,
-      "min_ms": 173.15,
-      "runs": 30,
+      "p50_ms": 290.2,
+      "p95_ms": 327.7,
+      "mean_ms": 290.06,
+      "min_ms": 225.14,
+      "runs": 50,
       "warmup": 5,
-      "threads": 0
+      "threads": 4,
+      "kind": "FP32"
     },
     {
-      "file": "best_nonms_int8.onnx",
-      "path": "models/best_nonms_int8.onnx",
-      "sha256_12": "bff384a90941",
-      "size_mb": 3.6,
+      "file": "best_int8_static.onnx",
+      "path": "models/best_int8_static.onnx",
+      "sha256_12": "b0723109775b",
+      "size_mb": 3.52,
       "opset": 13,
       "imgsz": [
         1280,
@@ -62,141 +63,15 @@
         ]
       ],
       "contract": "nonms",
-      "p50_ms": 114.76,
-      "p95_ms": 170.21,
-      "mean_ms": 121.11,
-      "min_ms": 96.72,
-      "runs": 30,
+      "p50_ms": 163.52,
+      "p95_ms": 179.0,
+      "mean_ms": 164.06,
+      "min_ms": 143.07,
+      "runs": 50,
       "warmup": 5,
-      "threads": 0
-    },
-    {
-      "file": "best_nms_backup.onnx",
-      "path": "models/best_nms_backup.onnx",
-      "sha256_12": "7c267d55ffcf",
-      "size_mb": 11.7,
-      "opset": 12,
-      "imgsz": [
-        1280,
-        1280
-      ],
-      "output_shapes": [
-        [
-          1,
-          300,
-          38
-        ],
-        [
-          1,
-          32,
-          320,
-          320
-        ]
-      ],
-      "contract": "nms",
-      "p50_ms": 171.22,
-      "p95_ms": 239.48,
-      "mean_ms": 180.17,
-      "min_ms": 157.93,
-      "runs": 30,
-      "warmup": 5,
-      "threads": 0
-    },
-    {
-      "file": "best_int8_dynamic.onnx",
-      "path": "models/best_int8_dynamic.onnx",
-      "sha256_12": "19116d9b7a02",
-      "size_mb": 3.77,
-      "opset": 12,
-      "imgsz": [
-        1280,
-        1280
-      ],
-      "output_shapes": [
-        [
-          1,
-          300,
-          38
-        ],
-        [
-          1,
-          32,
-          320,
-          320
-        ]
-      ],
-      "contract": "nms",
-      "p50_ms": 1303.2,
-      "p95_ms": 1453.68,
-      "mean_ms": 1331.17,
-      "min_ms": 1259.5,
-      "runs": 30,
-      "warmup": 5,
-      "threads": 0
-    },
-    {
-      "file": "best_int8_static.onnx",
-      "path": "models/best_int8_static.onnx",
-      "sha256_12": "639c91c94a7a",
-      "size_mb": 3.71,
-      "opset": 13,
-      "imgsz": [
-        1280,
-        1280
-      ],
-      "output_shapes": [
-        [
-          1,
-          300,
-          38
-        ],
-        [
-          1,
-          32,
-          320,
-          320
-        ]
-      ],
-      "contract": "nms",
-      "p50_ms": 101.66,
-      "p95_ms": 112.84,
-      "mean_ms": 103.54,
-      "min_ms": 95.81,
-      "runs": 30,
-      "warmup": 5,
-      "threads": 0
-    },
-    {
-      "file": "best_int8_convonly.onnx",
-      "path": "models/best_int8_convonly.onnx",
-      "sha256_12": "d41193d2d072",
-      "size_mb": 3.91,
-      "opset": 13,
-      "imgsz": [
-        1280,
-        1280
-      ],
-      "output_shapes": [
-        [
-          1,
-          300,
-          38
-        ],
-        [
-          1,
-          32,
-          320,
-          320
-        ]
-      ],
-      "contract": "nms",
-      "p50_ms": 204.16,
-      "p95_ms": 231.88,
-      "mean_ms": 209.77,
-      "min_ms": 193.29,
-      "runs": 30,
-      "warmup": 5,
-      "threads": 0
+      "threads": 4,
+      "kind": "INT8 静态",
+      "sanity": "20/20"
     }
   ]
 }

@@ -47,3 +47,6 @@ _private/
 # C# �������
 src/csharp/**/bin/
 src/csharp/**/obj/
+
+# 量化实验产物（每个 3~4 MB，不进仓库）
+models/_exp/

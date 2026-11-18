@@ -130,6 +130,35 @@ def exclude_nodes(path: Path) -> list[str]:
     return names
 
 
+def exclude_near_outputs(path: Path, hops: int = 2) -> list[str]:
+    """排除「离模型输出 hops 跳以内」的节点。
+
+    为什么必须这么做（这个坑花了一整晚）：
+        `output0` 是 `[1, 40, 33600]` 的一张**混合**张量 ——
+        第 0–3 行是框坐标（0～1300 像素），第 4–7 行是类别置信度（0～1）。
+        量化是**整个张量共用一个 scale**：max≈1282 → scale≈1282/255≈5。
+        于是 0.51 的置信度被四舍五入成 **0**，模型对所有图片都返回「没有缺陷」。
+
+    实测：不排除 → 类别分数一律 0.000，17 张缺陷图全部漏检；
+          排除输出前 2 跳（13 个节点）→ 0.527 / 0.555，与 FP32 的 0.511 / 0.563 基本一致。
+    """
+    import onnx
+
+    g = onnx.load(str(path)).graph
+    producer = {o: n for n in g.node for o in n.output}
+    frontier = {o.name for o in g.output}
+    near: set[str] = set(frontier)
+    for _ in range(hops + 1):
+        nxt: set[str] = set()
+        for t in frontier:
+            n = producer.get(t)
+            if n is not None:
+                near.update(n.output)
+                nxt.update(n.input)
+        frontier = nxt
+    return [n.name for n in g.node if n.name and any(o in near for o in n.output)]
+
+
 def ensure_opset13(src: Path) -> Path:
     """静态量化会生成带 `axis` 属性的 DequantizeLinear，而该属性从 opset 13 才有。
 
@@ -168,7 +197,13 @@ def quantize_dynamic_mode(src: Path, dst: Path) -> None:
 
 
 def build_calib_reader(src: Path, imgsz: int, limit: int):
-    """从训练集取真实图片做校准（LetterBox 到 640，BGR->RGB，归一化）。"""
+    """从训练集取真实图片做校准（LetterBox 到**模型实际尺寸**，BGR->RGB，归一化）。
+
+    ⚠ 踩过的坑：这里曾经用 `--imgsz` 的默认值 640，而模型是 1280。
+    校准图被压到 640 塞进 1280 的模型，统计出来的激活范围完全是错的 ——
+    量化后的模型对所有图片都返回 0 个框（置信度恒为 0），
+    但脚本一路打印"成功"，没人发现。现在 imgsz 必须由调用方从模型里读出来传进来。
+    """
     import cv2
     from onnxruntime.quantization import CalibrationDataReader
 
@@ -179,6 +214,7 @@ def build_calib_reader(src: Path, imgsz: int, limit: int):
         raise SystemExit(f"校准集为空: {img_dir}")
 
     print(f"  校准图 {len(files)} 张（来自 train，绝不能用 val/test，否则泄漏）")
+    print(f"  校准尺寸 {imgsz}（与模型输入一致才算对）")
 
     class Reader(CalibrationDataReader):
         def __init__(self):
@@ -212,8 +248,11 @@ def build_calib_reader(src: Path, imgsz: int, limit: int):
     return Reader()
 
 
-def quantize_static_mode(src: Path, dst: Path, imgsz: int, calib: int,
-                         op_types: list[str] | None = None) -> None:
+def quantize_static_mode(src: Path, dst: Path, imgsz: int | None, calib: int,
+                         op_types: list[str] | None = None,
+                         method: str = "minmax",
+                         head_hops: int = 2,
+                         fmt: str = "qoperator") -> None:
     from onnxruntime.quantization import (
         CalibrationMethod,
         QuantFormat,
@@ -221,19 +260,99 @@ def quantize_static_mode(src: Path, dst: Path, imgsz: int, calib: int,
         quantize_static,
     )
 
+    if imgsz is None:
+        imgsz = model_meta(src)["imgsz"][0]
+
+    cmap = {"minmax": CalibrationMethod.MinMax,
+            "percentile": CalibrationMethod.Percentile,
+            "entropy": CalibrationMethod.Entropy}
+    fmap = {"qdq": QuantFormat.QDQ, "qoperator": QuantFormat.QOperator}
+    op13 = ensure_opset13(src)
+    excl = exclude_nodes(op13) + exclude_near_outputs(op13, head_hops)
+    print(f"  量化格式 {fmt} · 排除 {len(excl)} 个节点（含输出前 {head_hops} 跳）")
     reader = build_calib_reader(src, imgsz, calib)
     quantize_static(
-        model_input=str(ensure_opset13(src)),
+        model_input=str(op13),
         model_output=str(dst),
         calibration_data_reader=reader,
-        quant_format=QuantFormat.QDQ,
+        quant_format=fmap[fmt],
         activation_type=QuantType.QUInt8,
         weight_type=QuantType.QInt8,
-        nodes_to_exclude=exclude_nodes(src),
+        nodes_to_exclude=excl,
         per_channel=True,
-        calibrate_method=CalibrationMethod.MinMax,
+        calibrate_method=cmap[method],
         op_types_to_quantize=op_types,
     )
+
+
+# --------------------------------------------------------------------------- #
+# 量化后必须做的一致性检查
+# --------------------------------------------------------------------------- #
+def _letterbox_file(path: Path, imgsz: int) -> np.ndarray:
+    import cv2
+
+    im = cv2.imread(str(path))
+    h, w = im.shape[:2]
+    r = min(imgsz / h, imgsz / w)
+    nh, nw = int(round(h * r)), int(round(w * r))
+    im = cv2.resize(im, (nw, nh), interpolation=cv2.INTER_LINEAR)
+    canvas = np.full((imgsz, imgsz, 3), 114, dtype=np.uint8)
+    top, left = (imgsz - nh) // 2, (imgsz - nw) // 2
+    canvas[top:top + nh, left:left + nw] = im
+    return canvas[:, :, ::-1].transpose(2, 0, 1).astype(np.float32) / 255.0
+
+
+def _detect_count(outs: list, contract: str, thr: float) -> tuple[int, float]:
+    """两种输出契约的置信度取法不同，取错了就永远统计成 0。"""
+    if contract == "nms":
+        conf = outs[0][0][:, 4]          # [300, 38]：第 5 列是置信度
+    else:
+        conf = outs[0][0][4:8].max(axis=0)  # [40, 33600]：第 5–8 行是 4 类分数
+    n = int((conf >= thr).sum())
+    return n, (float(conf.max()) if conf.size else 0.0)
+
+
+def sanity(fp32_path: Path, int8_path: Path, thr: float = 0.05, limit: int = 20) -> dict | None:
+    """拿真实图逐张对比 FP32 与 INT8 的检出数。
+
+    只测延迟不测精度 = 把一个「什么都不输出」的模型当成加速 1.7 倍卖出去。
+    实测就发生过：静态量化后所有缺陷图返回 0 个框，判定一致率 57.5%（那 57.5% 全是良品）。
+    """
+    m32 = model_meta(fp32_path)
+    m8 = model_meta(int8_path)
+    if m32["contract"] != m8["contract"]:
+        print("  ⚠ 两个模型输出契约不同，无法逐图对比（先确认是同一版权重导出的）")
+        return None
+
+    imgsz = m32["imgsz"][0]
+    s32 = load_sess(fp32_path)
+    s8 = load_sess(int8_path)
+    name = s32.get_inputs()[0].name
+
+    files = sorted((ROOT / "data" / "yolo" / "images" / "val").glob("*.jpg"))[:limit]
+    rows = []
+    for p in files:
+        x = _letterbox_file(p, imgsz)
+        n32, c32 = _detect_count(s32.run(None, {name: x[None]}), m32["contract"], thr)
+        n8, c8 = _detect_count(s8.run(None, {name: x[None]}), m8["contract"], thr)
+        rows.append({"file": p.name, "fp32_n": n32, "fp32_conf": c32,
+                     "int8_n": n8, "int8_conf": c8,
+                     "same": (n32 > 0) == (n8 > 0)})
+
+    same = sum(r["same"] for r in rows)
+    zero8 = sum(1 for r in rows if r["int8_n"] == 0)
+    real_defect = sum(1 for r in rows if r["fp32_n"] > 0)
+    print(f"\n  {'文件':<34}{'FP32 检出/置信':>20}{'INT8 检出/置信':>20}{'判定':>8}")
+    print("  " + "-" * 82)
+    for r in rows:
+        print(f"  {r['file']:<34}{r['fp32_n']:>6} / {r['fp32_conf']:>8.3f}"
+              f"{r['int8_n']:>14} / {r['int8_conf']:>10.3f}{'  一致' if r['same'] else '  ⚠ 翻转'}")
+    print(f"\n  判定一致率 {same}/{len(rows)} = {same / len(rows):.1%}")
+    if real_defect and zero8 == len(rows):
+        print("  ❌ INT8 对所有图片都返回 0 个框 —— 校准尺寸或校准方法有问题，这个模型不能用")
+    elif real_defect and all(r["int8_n"] == 0 for r in rows if r["fp32_n"] > 0):
+        print("  ❌ 所有缺陷图都被 INT8 漏检 —— 这个模型不能用")
+    return {"same": same, "total": len(rows), "rows": rows}
 
 
 # --------------------------------------------------------------------------- #
@@ -341,6 +460,14 @@ def main() -> int:
     ap.add_argument("--imgsz", type=int, default=None,
                     help="默认从模型里读；给了就必须与模型一致，否则报错")
     ap.add_argument("--calib", type=int, default=60, help="静态量化的校准图数量")
+    ap.add_argument("--calib-method", choices=["minmax", "percentile", "entropy"],
+                    default="minmax", help="校准方法；输出全零时先换 percentile 试试")
+    ap.add_argument("--head-hops", type=int, default=2,
+                    help="排除离输出多少跳以内的节点，默认 2（输出 Concat 混了框坐标和置信度）")
+    ap.add_argument("--format", choices=["qoperator", "qdq"], default="qoperator",
+                    help="qoperator 在 CPU 上更快，qdq 留给 NPU/GPU")
+    ap.add_argument("--out", default=None, help="量化产物路径（不写会覆盖默认文件名）")
+    ap.add_argument("--conf", type=float, default=0.05, help="一致性检查用的置信度阈值")
     ap.add_argument("--threads", type=int, default=0, help="intra_op 线程数，0=ORT 默认")
     ap.add_argument("--runs", type=int, default=30)
     args = ap.parse_args()
@@ -368,6 +495,8 @@ def main() -> int:
         return 0
 
     src = Path(args.model)
+    if not src.is_absolute():
+        src = ROOT / src
     if not src.exists():
         print(f"❌ 找不到模型: {src}")
         return 1
@@ -399,14 +528,25 @@ def main() -> int:
         print("\n" + "=" * 58)
         print(f"  {title}")
         print("=" * 58)
-        dst = OUT_DIR / ("best_int8_convonly.onnx" if only_conv else "best_int8_static.onnx")
+        dst = Path(args.out) if args.out else OUT_DIR / (
+            "best_int8_convonly.onnx" if only_conv else "best_int8_static.onnx")
+        if not dst.is_absolute():
+            dst = ROOT / dst
         t0 = time.perf_counter()
-        quantize_static_mode(src, dst, args.imgsz or 640, args.calib,
-                             op_types=["Conv"] if only_conv else None)
+        quantize_static_mode(src, dst, args.imgsz, args.calib,
+                             op_types=["Conv"] if only_conv else None,
+                             method=args.calib_method,
+                             head_hops=args.head_hops,
+                             fmt=args.format)
         print(f"  生成 {dst.name}（{time.perf_counter() - t0:.1f} 秒）")
+
+        print("\n  --- 量化后一致性检查（不通过就别用） ---")
+        report = sanity(src, dst, thr=args.conf)
         r = bench(dst, args.imgsz, args.runs, threads=args.threads)
-        results.append({**r, "kind": "INT8 仅Conv" if only_conv else "INT8 静态"})
-        print(f"  {r['size_mb']} MB  p50 {r['p50_ms']} ms")
+        results.append({**r, "kind": "INT8 仅Conv" if only_conv else "INT8 静态",
+                        "sanity": None if report is None else
+                        f"{report['same']}/{report['total']}"})
+        print(f"\n  {r['size_mb']} MB  p50 {r['p50_ms']} ms")
 
     if len(results) > 1:
         print("\n" + "=" * 58)
