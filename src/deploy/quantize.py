@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -44,10 +45,55 @@ def load_sess(path: Path, threads: int = 0) -> ort.InferenceSession:
     return ort.InferenceSession(str(path), so, providers=["CPUExecutionProvider"])
 
 
-def bench(path: Path, imgsz: int = 640, n: int = 30, warmup: int = 5) -> dict:
-    sess = load_sess(path)
+def model_meta(path: Path) -> dict:
+    """读模型的真实输入尺寸与输出契约。
+
+    踩过的坑：`--imgsz` 默认写过 640，而部署模型是 1280 —— 用 640 的随机张量
+    去喂 1280 的模型，要么直接报错，要么（在旧版本里）悄悄拿错产物做对比。
+    所以尺寸一律从模型里读，不许由人传。
+
+    输出契约也要记：带 NMS 的导出是 `[1,300,38]`，不带 NMS 的是 `[1,40,33600]`。
+    两种契约的延迟不可比 —— 一个把 NMS 算在模型里，一个不算。
+    """
+    import hashlib
+
+    import onnx
+
+    m = onnx.load(str(path), load_external_data=False)
+    opset = max((o.version for o in m.opset_import if o.domain in ("", "ai.onnx")), default=0)
+    in_dims = [d.dim_value or d.dim_param for d in m.graph.input[0].type.tensor_type.shape.dim]
+    out_shapes = [
+        [d.dim_value or d.dim_param for d in o.type.tensor_type.shape.dim] for o in m.graph.output
+    ]
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()[:12]
+    h, w = int(in_dims[2]), int(in_dims[3])
+    contract = "nms" if any(s[-1] == 38 for s in out_shapes if len(s) == 3) else "nonms"
+    return {
+        "file": path.name,
+        "path": str(path.relative_to(ROOT)).replace("\\", "/"),
+        "sha256_12": digest,
+        "size_mb": round(path.stat().st_size / 1024 / 1024, 2),
+        "opset": opset,
+        "imgsz": [h, w],
+        "output_shapes": out_shapes,
+        "contract": contract,
+    }
+
+
+def bench(path: Path, imgsz: int | None = None, n: int = 30, warmup: int = 5,
+          threads: int = 0) -> dict:
+    """测延迟。imgsz 不给就从模型里读；给了但和模型不一致就报错退出。"""
+    meta = model_meta(path)
+    real = meta["imgsz"][0]
+    if imgsz is not None and imgsz != real:
+        raise SystemExit(
+            f"❌ --imgsz {imgsz} 与模型实际输入 {real} 不一致：{path.name}\n"
+            f"   尺寸必须与导出时一致，否则比的不是同一个模型。"
+        )
+
+    sess = load_sess(path, threads)
     name = sess.get_inputs()[0].name
-    x = np.random.rand(1, 3, imgsz, imgsz).astype(np.float32)
+    x = np.random.rand(1, 3, real, real).astype(np.float32)
 
     for _ in range(warmup):
         sess.run(None, {name: x})
@@ -59,14 +105,15 @@ def bench(path: Path, imgsz: int = 640, n: int = 30, warmup: int = 5) -> dict:
         ts.append((time.perf_counter() - t0) * 1000)
 
     ts_arr = np.array(ts)
-    size_mb = path.stat().st_size / 1024 / 1024
     return {
-        "file": path.name,
-        "size_mb": round(size_mb, 2),
+        **meta,
         "p50_ms": round(float(np.percentile(ts_arr, 50)), 2),
         "p95_ms": round(float(np.percentile(ts_arr, 95)), 2),
         "mean_ms": round(float(ts_arr.mean()), 2),
+        "min_ms": round(float(ts_arr.min()), 2),
         "runs": n,
+        "warmup": warmup,
+        "threads": threads,
     }
 
 
@@ -190,16 +237,135 @@ def quantize_static_mode(src: Path, dst: Path, imgsz: int, calib: int,
 
 
 # --------------------------------------------------------------------------- #
+# 报告落盘（json 和 md 必须来自同一次运行，否则迟早对不上）
+# --------------------------------------------------------------------------- #
+def environment() -> dict:
+    import platform
+
+    import onnxruntime
+
+    return {
+        "run_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "onnxruntime": onnxruntime.__version__,
+        "python": platform.python_version(),
+        "cpu_logical": os.cpu_count(),
+    }
+
+
+def write_reports(results: list[dict], env: dict) -> tuple[Path, Path]:
+    """一次运行同时写 JSON 和 Markdown —— 两份文件不可能再打架。"""
+    payload = {"env": env, "results": results}
+    js = ROOT / "reports" / "quantization.json"
+    js.parent.mkdir(parents=True, exist_ok=True)
+    js.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    groups: dict[tuple, list[dict]] = {}
+    for r in results:
+        groups.setdefault((r["imgsz"][0], r["contract"]), []).append(r)
+
+    lines = [
+        "# 量化与延迟对比（自动生成，勿手改）",
+        "",
+        "> 本文件由 `src/deploy/quantize.py` 生成。数字与 `quantization.json` 来自**同一次运行**。",
+        "> 复现命令、模型 sha、线程数、运行次数全部记在下面 —— 缺任何一项，这份数字就不可引用。",
+        "",
+        "## 运行环境",
+        "",
+        "| 项 | 值 |",
+        "|---|---|",
+        f"| 生成时间 | {env['run_at']} |",
+        f"| onnxruntime | {env['onnxruntime']} |",
+        f"| Python | {env['python']} |",
+        f"| 逻辑 CPU | {env['cpu_logical']} |",
+        "",
+    ]
+
+    for (size, contract), rows in sorted(groups.items()):
+        name = "带 NMS" if contract == "nms" else "不带 NMS"
+        fp32 = next((r for r in rows if "int8" not in r["file"].lower()), None)
+        base = fp32["p50_ms"] if fp32 else min(r["p50_ms"] for r in rows)
+        lines += [
+            f"## {size}×{size} · {name}",
+            "",
+            f"输出契约：`{contract}` · 同组内对比有效，**跨组不可比**（NMS 算不算在模型里不一样）。",
+            "",
+            f"「相对 FP32」一列：数字 = FP32 p50 ÷ 本模型 p50。**大于 1 是变快，小于 1 是变慢。**"
+            f"（基准：`{fp32['file'] if fp32 else '最快者'}` = 1.00×）",
+            "",
+            "| 模型 | 体积 MB | p50 ms | p95 ms | 相对 FP32 | sha256 |",
+            "|---|---|---|---|---|---|",
+        ]
+        for r in rows:
+            lines.append(
+                f"| `{r['file']}` | {r['size_mb']} | {r['p50_ms']} | {r['p95_ms']} | "
+                f"{base / r['p50_ms']:.2f}× | `{r['sha256_12']}` |"
+            )
+        lines += ["", f"每组 {rows[0]['runs']} 次计时，预热 {rows[0]['warmup']} 次，"
+                      f"线程 {rows[0]['threads'] or 'ORT 默认'}。", ""]
+
+    lines += [
+        "## 这份报告**不能**说明什么",
+        "",
+        "1. **只测了延迟，没测精度。** 量化会让模型变差还是不变，这个脚本不回答。",
+        "   要回答得跑 `src/eval/quant_compare.py`，而且它目前只支持带 NMS 的 `[1,300,38]` 契约，",
+        "   部署用的不带 NMS 模型它还比不了 —— 这是下一个要补的洞。",
+        "2. **简历/汇报里不许写「量化无损」。** 没有精度对比就没有这个结论。",
+        "3. 随机张量测的是算力，不是数据分布。真实图片的耗时可能略高（后处理另算）。",
+        "",
+        "## 复现命令",
+        "",
+        "```powershell",
+        "python src\\deploy\\quantize.py --models models\\best.onnx models\\best_nonms_int8.onnx",
+        "```",
+        "",
+        "> ⚠ 历史教训：此前的 `量化对比.md` 记 FP32 p50 **32.07 ms**（640、20 线程、baseline_v1），",
+        "> 而 `quantization.json` 记 FP32 p50 **216.81 ms**（1280、默认线程、NMS 契约）。",
+        "> 两个数都不是假的，但**它们不是同一个东西**，却被当成同一个指标引用了半个月。",
+    ]
+
+    md = ROOT / "reports" / "量化对比.md"
+    md.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return js, md
+
+
+# --------------------------------------------------------------------------- #
 # 主流程
 # --------------------------------------------------------------------------- #
 def main() -> int:
     ap = argparse.ArgumentParser(description="INT8 量化与延迟对比")
     ap.add_argument("--model", default=str(MODELS / "best.onnx"))
-    ap.add_argument("--mode", choices=["dynamic", "static", "convonly", "bench-only", "all"], default="dynamic")
-    ap.add_argument("--imgsz", type=int, default=640)
+    ap.add_argument("--models", nargs="*", default=None,
+                    help="只跑基准：给一组模型路径，逐个体测并出报告（不量化）")
+    ap.add_argument("--mode", choices=["dynamic", "static", "convonly", "bench-only", "all"],
+                    default="dynamic")
+    ap.add_argument("--imgsz", type=int, default=None,
+                    help="默认从模型里读；给了就必须与模型一致，否则报错")
     ap.add_argument("--calib", type=int, default=60, help="静态量化的校准图数量")
+    ap.add_argument("--threads", type=int, default=0, help="intra_op 线程数，0=ORT 默认")
     ap.add_argument("--runs", type=int, default=30)
     args = ap.parse_args()
+
+    env = environment()
+
+    # ---- 只跑基准：多模型横向对比 ----
+    if args.models:
+        results = []
+        for raw in args.models:
+            p = Path(raw)
+            if not p.is_absolute():
+                p = ROOT / raw
+            if not p.exists():
+                print(f"❌ 找不到模型: {p}")
+                return 1
+            r = bench(p, args.imgsz, args.runs, threads=args.threads)
+            results.append(r)
+            print(f"  {r['file']:<28} {r['imgsz'][0]:>5}  {r['size_mb']:>6} MB  "
+                  f"p50 {r['p50_ms']:>7} ms  [{r['contract']}]")
+
+        js, md = write_reports(results, env)
+        print(f"\n  已写 {js.relative_to(ROOT)}")
+        print(f"  已写 {md.relative_to(ROOT)}")
+        return 0
 
     src = Path(args.model)
     if not src.exists():
@@ -211,7 +377,7 @@ def main() -> int:
     print("=" * 58)
     print("  FP32 基线")
     print("=" * 58)
-    fp32 = bench(src, args.imgsz, args.runs)
+    fp32 = bench(src, args.imgsz, args.runs, threads=args.threads)
     results.append({**fp32, "kind": "FP32"})
     print(f"  {fp32['file']}  {fp32['size_mb']} MB  p50 {fp32['p50_ms']} ms")
 
@@ -223,7 +389,7 @@ def main() -> int:
         t0 = time.perf_counter()
         quantize_dynamic_mode(src, dst)
         print(f"  生成 {dst.name}（{time.perf_counter() - t0:.1f} 秒）")
-        r = bench(dst, args.imgsz, args.runs)
+        r = bench(dst, args.imgsz, args.runs, threads=args.threads)
         results.append({**r, "kind": "INT8 动态"})
         print(f"  {r['size_mb']} MB  p50 {r['p50_ms']} ms")
 
@@ -235,10 +401,10 @@ def main() -> int:
         print("=" * 58)
         dst = OUT_DIR / ("best_int8_convonly.onnx" if only_conv else "best_int8_static.onnx")
         t0 = time.perf_counter()
-        quantize_static_mode(src, dst, args.imgsz, args.calib,
+        quantize_static_mode(src, dst, args.imgsz or 640, args.calib,
                              op_types=["Conv"] if only_conv else None)
         print(f"  生成 {dst.name}（{time.perf_counter() - t0:.1f} 秒）")
-        r = bench(dst, args.imgsz, args.runs)
+        r = bench(dst, args.imgsz, args.runs, threads=args.threads)
         results.append({**r, "kind": "INT8 仅Conv" if only_conv else "INT8 静态"})
         print(f"  {r['size_mb']} MB  p50 {r['p50_ms']} ms")
 
@@ -251,10 +417,9 @@ def main() -> int:
         for r in results:
             print(f"  {r['kind']:<14}{r['size_mb']:>9}{r['p50_ms']:>10}{base / r['p50_ms']:>8.2f}x")
 
-        out = ROOT / "reports" / "quantization.json"
-        out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_text(json.dumps(results, ensure_ascii=False, indent=2), encoding="utf-8")
-        print(f"\n  已存 {out}")
+        js, md = write_reports(results, env)
+        print(f"\n  已写 {js.relative_to(ROOT)}")
+        print(f"  已写 {md.relative_to(ROOT)}")
 
     return 0
 
