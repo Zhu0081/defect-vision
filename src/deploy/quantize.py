@@ -411,13 +411,13 @@ def write_reports(results: list[dict], env: dict) -> tuple[Path, Path]:
             f"「相对 FP32」一列：数字 = FP32 p50 ÷ 本模型 p50。**大于 1 是变快，小于 1 是变慢。**"
             f"（基准：`{fp32['file'] if fp32 else '最快者'}` = 1.00×）",
             "",
-            "| 模型 | 体积 MB | p50 ms | p95 ms | 相对 FP32 | sha256 |",
-            "|---|---|---|---|---|---|",
+            "| 模型 | 体积 MB | p50 ms | p95 ms | 相对 FP32 | 精度自检 | sha256 |",
+            "|---|---|---|---|---|---|---|",
         ]
         for r in rows:
             lines.append(
                 f"| `{r['file']}` | {r['size_mb']} | {r['p50_ms']} | {r['p95_ms']} | "
-                f"{base / r['p50_ms']:.2f}× | `{r['sha256_12']}` |"
+                f"{base / r['p50_ms']:.2f}× | {r.get('sanity') or '—'} | `{r['sha256_12']}` |"
             )
         lines += ["", f"每组 {rows[0]['runs']} 次计时，预热 {rows[0]['warmup']} 次，"
                       f"线程 {rows[0]['threads'] or 'ORT 默认'}。", ""]
@@ -425,16 +425,18 @@ def write_reports(results: list[dict], env: dict) -> tuple[Path, Path]:
     lines += [
         "## 这份报告**不能**说明什么",
         "",
-        "1. **只测了延迟，没测精度。** 量化会让模型变差还是不变，这个脚本不回答。",
-        "   要回答得跑 `src/eval/quant_compare.py`，而且它目前只支持带 NMS 的 `[1,300,38]` 契约，",
-        "   部署用的不带 NMS 模型它还比不了 —— 这是下一个要补的洞。",
-        "2. **简历/汇报里不许写「量化无损」。** 没有精度对比就没有这个结论。",
+        "1. **「精度自检」只比「检出 / 未检出」，不是 mAP。**"
+        " 它只能挡住「模型被量化弄死、什么都不返回」这种情况；",
+        "   置信度掉了多少要看逐图对比：`python src\\eval\\quant_compare.py "
+        "--fp32 models\\best.onnx --int8 models\\best_int8_static.onnx --splits val test`。",
+        "2. **简历/汇报里不许写「量化无损」。** 没跑独立 mAP 就没有这个结论。",
         "3. 随机张量测的是算力，不是数据分布。真实图片的耗时可能略高（后处理另算）。",
         "",
         "## 复现命令",
         "",
         "```powershell",
-        "python src\\deploy\\quantize.py --models models\\best.onnx models\\best_nonms_int8.onnx",
+        "python src\\deploy\\quantize.py --model models\\best.onnx --mode static "
+        "--calib 60 --runs 50 --threads 4 --out models\\best_int8_static.onnx",
         "```",
         "",
         "> ⚠ 历史教训：此前的 `量化对比.md` 记 FP32 p50 **32.07 ms**（640、20 线程、baseline_v1），",

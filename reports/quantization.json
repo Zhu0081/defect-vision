@@ -1,6 +1,6 @@
 {
   "env": {
-    "run_at": "2026-11-18 20:58:33",
+    "run_at": "2026-11-18 21:02:07",
     "onnxruntime": "1.31.1",
     "python": "3.11.9",
     "cpu_logical": 20
@@ -30,10 +30,10 @@
         ]
       ],
       "contract": "nonms",
-      "p50_ms": 290.2,
-      "p95_ms": 327.7,
-      "mean_ms": 290.06,
-      "min_ms": 225.14,
+      "p50_ms": 299.97,
+      "p95_ms": 319.21,
+      "mean_ms": 292.7,
+      "min_ms": 206.88,
       "runs": 50,
       "warmup": 5,
       "threads": 4,
@@ -63,10 +63,10 @@
         ]
       ],
       "contract": "nonms",
-      "p50_ms": 163.52,
-      "p95_ms": 179.0,
-      "mean_ms": 164.06,
-      "min_ms": 143.07,
+      "p50_ms": 167.66,
+      "p95_ms": 181.33,
+      "mean_ms": 167.27,
+      "min_ms": 138.33,
       "runs": 50,
       "warmup": 5,
       "threads": 4,
