@@ -254,7 +254,7 @@ def test_report_carries_its_scope(client):
     只看当前模型上线后是「漏检 0%」。数字本身不会说话，口径才会。
     """
     body = client.get("/report").json()
-    assert body["filters"] == {"since": None, "model": None}
+    assert body["filters"] == {"since": None, "model": None, "model_sha": None}
 
     # 一个远在未来的 since：什么都筛不出来，而且必须是干干净净的 0，不是 500
     empty = client.get("/report?since=2999-01-01").json()
@@ -265,3 +265,51 @@ def test_report_carries_its_scope(client):
 
     # 写错的日期要 400，不能静默当成「不过滤」
     assert client.get("/report?since=abc").status_code == 400
+
+def test_report_returns_denominators(client):
+    """比率必须连分母一起返回。
+
+    为什么：`过杀率 0%` 可能是「真的零过杀」，也可能是「一条良品都没有」。
+    两个 0% 在调用方看来长得一模一样 —— 这正是当初误读「漏检 0%」的病根。
+    """
+    body = client.get("/report").json()
+    assert set(body["samples"]) == {"labeled", "positive", "negative"}
+    s = body["samples"]
+    assert s["positive"] + s["negative"] == s["labeled"] == body["labeled"]
+
+    # 一个什么都没有的区间：分母是 0，两个比率都必须是 None 而不是 0
+    empty = client.get("/report?since=2999-01-01").json()
+    assert empty["samples"] == {"labeled": 0, "positive": 0, "negative": 0}
+    assert empty["miss_rate_pct"] is None
+    assert empty["overkill_rate_pct"] is None
+
+
+def test_record_carries_fingerprint(client):
+    """检测记录必须能回答「哪份权重 + 多大输入 + 什么阈值」。
+
+    111 条历史里 model_name 只有一个值（onnx:best.onnx），却横跨 20 天、换过四版权重
+    —— 只看文件名永远分不清。所以必须记内容摘要 + 推理参数。
+    测试环境是 MockDetector（没有文件、没有 imgsz），此时三者应当是「如实为空」，
+    不是编一个假值。
+    """
+    import cv2 as _cv2
+    import numpy as _np
+
+    ok, buf = _cv2.imencode(".png", _np.full((64, 64, 3), 180, dtype=_np.uint8))
+    r = client.post("/detect", files={"file": ("fp.png", buf.tobytes(), "image/png")})
+    assert r.status_code == 200
+    iid = r.json()["inspection_id"]
+
+    rec = client.get(f"/records/{iid}").json()
+    assert "model_sha" in rec and "imgsz" in rec and "conf_thr" in rec
+    assert rec["model_sha"] is None      # Mock 没有模型文件，就不许有摘要
+    assert rec["imgsz"] is None          # Mock 不做 letterbox，也不许有尺寸
+    assert rec["conf_thr"] == 0.25       # 阈值是真实生效的值，必须记下来
+
+
+def test_report_filters_by_model_sha(client):
+    """按内容摘要筛选：老记录没有摘要，用任何 sha 去筛都应该是 0 条，而不是报错。"""
+    body = client.get("/report?model_sha=deadbeef0000").json()
+    assert body["filters"]["model_sha"] == "deadbeef0000"
+    assert body["total_inspections"] == 0
+    assert body["samples"]["labeled"] == 0

@@ -118,6 +118,16 @@ MIGRATIONS: list[tuple[str, str, str]] = [
     # 轮廓点数不固定（本项目 20~30 点），拆表要么一行多点、要么多行拼装，
     # 两种都比"一整段 JSON 跟着这条缺陷一起读"更麻烦。TEXT 在两端都能存。
     ("defect_item", "polygon", "polygon TEXT"),
+    # 模型指纹与推理参数。为什么非加不可：
+    # 111 条历史记录里 model_name 只有 1 个值（onnx:best.onnx），但这 111 条
+    # 横跨 20 天、中间换过 v1~v4 四版权重 —— 光看名字根本分不清哪条是哪个模型跑的。
+    # 模型文件名会复用（best.onnx 每次训练都叫这个），内容却完全不同，
+    # 所以必须记内容摘要（sha256 前 12 位）。
+    # imgsz / conf_thr 同理：同一个权重换 640 或换阈值，结果完全不同。
+    # 三列全部可空：老记录没法追溯，显示「未知」，绝不按日期猜。
+    ("inspection", "model_sha", "model_sha VARCHAR(16)"),
+    ("inspection", "imgsz", "imgsz INTEGER"),
+    ("inspection", "conf_thr", "conf_thr REAL"),
 ]
 
 
@@ -163,17 +173,26 @@ def save_inspection(
     max_score: float,
     latency_ms: float,
     items: list[dict[str, Any]],
+    model_sha: str | None = None,
+    imgsz: int | None = None,
+    conf_thr: float | None = None,
 ) -> int:
-    """一次事务写入「检测记录 + 它的所有缺陷框」，返回 inspection.id。"""
+    """一次事务写入「检测记录 + 它的所有缺陷框」，返回 inspection.id。
+
+    model_sha / imgsz / conf_thr 都是可选的「可追溯字段」：
+    老调用方不传就是 NULL，查询端一律按「未知」处理，不做任何推断。
+    """
     eng = get_engine()
     pg = eng.dialect.name == "postgresql"
     insert_sql = """
         INSERT INTO inspection
             (batch_id, filename, image_path, part_id, light, model_name,
-             is_mock, verdict, n_defects, max_score, latency_ms)
+             is_mock, verdict, n_defects, max_score, latency_ms,
+             model_sha, imgsz, conf_thr)
         VALUES
             (:batch_id, :filename, :image_path, :part_id, :light, :model_name,
-             :is_mock, :verdict, :n_defects, :max_score, :latency_ms)
+             :is_mock, :verdict, :n_defects, :max_score, :latency_ms,
+             :model_sha, :imgsz, :conf_thr)
     """ + (" RETURNING id" if pg else "")
 
     with eng.begin() as conn:
@@ -191,6 +210,9 @@ def save_inspection(
                 "n_defects": n_defects,
                 "max_score": max_score,
                 "latency_ms": latency_ms,
+                "model_sha": model_sha,
+                "imgsz": imgsz,
+                "conf_thr": conf_thr,
             },
         )
         iid = res.scalar_one() if pg else res.lastrowid
@@ -409,6 +431,7 @@ def _percentile(values: list[float], p: float) -> float:
 def report_summary(
     since: datetime | None = None,
     model: str | None = None,
+    model_sha: str | None = None,
 ) -> dict[str, Any]:
     """混淆矩阵 + 漏检率/过杀率 + 节拍分位数。
 
@@ -418,10 +441,18 @@ def report_summary(
         FP = 本来好的 && 判 ng   -> 过杀（产线自己承担成本）
         TN = 本来好的 && 判 ok
 
-    为什么要有 since / model 两个过滤：
+    为什么要有 since / model / model_sha 三个过滤：
         这个库是「所有历史」的桶。换过模型、换过阈值、换过推理尺寸的记录
         全都堆在一起。直接聚合会把旧模型犯的错算到新模型头上 ——
         实测就有一次：全历史漏检 19.39%，但只看当前模型上线后的记录是 0%。
+
+    model（文件名）和 model_sha（内容摘要）是两个不同的东西：
+        文件名会复用（每次训练都叫 best.onnx），sha 不会。
+        要判断「这个数字是哪个权重跑出来的」只能看 sha。
+
+    分母也必须一起返回（samples）：
+        过杀率 0% 可能是真的零过杀，也可能是「一条良品都没有」。
+        不写分母，这两个 0% 长得一模一样。
 
     created_at 是 TIMESTAMP（不带时区）列，库里存的是 **UTC 墙钟时间**，
     而调用方给的 since 是**本地时间**（人只会按本地日期想问题），
@@ -442,6 +473,9 @@ def report_summary(
     if model:
         where.append("model_name = :model")
         params["model"] = model
+    if model_sha:
+        where.append("model_sha = :model_sha")
+        params["model_sha"] = model_sha
     cond = " AND ".join(where)
 
     with eng.connect() as conn:
@@ -494,6 +528,14 @@ def report_summary(
         "filters": {
             "since": since.isoformat(sep=" ", timespec="seconds") if since else None,
             "model": model,
+            "model_sha": model_sha,
+        },
+        # 分母。没有这一段，「过杀率 0%（0 条良品）」和「过杀率 0%（9 条良品）」
+        # 在调用方看来是一模一样的字符串 —— 这就是当初误读「漏检 0%」的同一个病。
+        "samples": {
+            "labeled": labeled,
+            "positive": pos,   # 真 NG 的条数，漏检率的分母
+            "negative": neg,   # 真 OK 的条数，过杀率的分母
         },
         "confusion": {"tp": tp, "fn": fn, "fp": fp, "tn": tn},
         "miss_rate_pct": round(fn / pos * 100, 2) if pos else None,

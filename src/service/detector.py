@@ -25,6 +25,20 @@ import numpy as np
 LABELS = ["scratch", "stain", "missing", "deform"]
 
 
+def _sha256_prefix(path: Path, n: int = 12) -> str:
+    """模型文件的 sha256 前 n 位。
+
+    为什么记这个而不是只记文件名：每次训练导出的都叫 best.onnx，
+    名字一样、内容完全不同。要看「这条记录是哪版权重跑的」只能看内容摘要。
+    按 1 MB 分块读，避免把 11.6 MB 一次性进内存（模型以后会更小，习惯先立好）。
+    """
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()[:n]
+
+
 @dataclass(frozen=True)
 class Detection:
     label: str
@@ -38,6 +52,9 @@ class Detection:
 class BaseDetector:
     name: str = "base"
     is_mock: bool = False
+    # 可追溯字段：老版本没有，统一按 None 处理（查询端显示「未知」，不做推断）
+    model_sha: str | None = None
+    imgsz: int | None = None
 
     def __init__(self, conf: float = 0.25) -> None:
         self.conf = conf
@@ -133,6 +150,11 @@ class OnnxDetector(BaseDetector):
         self.input_name = inp.name
         self.name = f"onnx:{self.model_path.name}"
         self.threads = n_threads
+        # 模型内容摘要（sha256 前 12 位）。
+        # 为什么不用文件名：每次训练导出的都叫 best.onnx，文件名一样内容完全不同。
+        # 11.6 MB 读一遍几十毫秒，只在启动时算一次，换来的能力是
+        # 「这条检测记录到底是哪版权重跑出来的」以后能查。
+        self.model_sha = _sha256_prefix(self.model_path)
 
     # -- 预处理 ------------------------------------------------------
     def _letterbox(self, img: np.ndarray) -> tuple[np.ndarray, float, int, int]:

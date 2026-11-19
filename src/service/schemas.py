@@ -89,6 +89,13 @@ class RecordOut(BaseModel):
     model_name: str | None = None
     is_mock: bool | None = None
 
+    # 可追溯三件套。老记录是 NULL —— 前端显示「未知」，绝不按日期猜。
+    # 为什么要有：111 条历史里 model_name 只有 1 个值，但那 111 条横跨 20 天、
+    # 换过四版权重。没有 sha，就说不清「这条记录到底是谁跑出来的」。
+    model_sha: str | None = None
+    imgsz: int | None = None
+    conf_thr: float | None = None
+
     @field_validator("created_at")
     @classmethod
     def _created_at_is_utc(cls, v: datetime | None) -> datetime | None:

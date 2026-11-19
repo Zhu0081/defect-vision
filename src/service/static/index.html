@@ -99,6 +99,8 @@
   .verdict.ok{background:#dcfce7; color:var(--ok)}
   .verdict.ng{background:#fee2e2; color:var(--ng)}
   .verdict small{display:block; font-size:12px; font-weight:500; letter-spacing:0; margin-top:4px; opacity:.8}
+/* 模型指纹：比判定小字更小、更淡，看得见但不抢戏 */
+.verdict small.fp{font-size:11px; opacity:.65; margin-top:2px; font-family:ui-monospace,Consolas,monospace}
 
   .stats{display:grid; grid-template-columns:repeat(4,1fr); gap:8px; margin-bottom:14px}
   @media (max-width:560px){ .stats{grid-template-columns:repeat(2,1fr)} }
@@ -415,10 +417,19 @@ function render(j, opts){
   const replay = !!(opts && opts.replay);
   const v = $('verdict');
   v.className = 'verdict ' + j.verdict;
+  // 「这条记录是哪版权重跑的」——文件名会复用（每次都叫 best.onnx），只能看内容摘要。
+  // 老记录没存过指纹，如实写「未知」，绝不按日期猜一个出来。
+  const fp = [];
+  if(replay){
+    fp.push(j.model_sha ? 'sha ' + j.model_sha : 'sha 未知（老记录）');
+    if(j.imgsz)           fp.push(j.imgsz + ' 输入');
+    if(j.conf_thr != null) fp.push('阈值 ' + (+j.conf_thr).toFixed(2));
+  }
   v.innerHTML = (j.verdict === 'ok' ? 'OK 良品' : 'NG 不良')
               + '<small>' + j.n_defects + ' 处缺陷 · '
               + (replay ? '历史记录（未重新推理）'
-                        : '判定阈值 ' + (+$('conf').value).toFixed(2)) + '</small>';
+                        : '判定阈值 ' + (+$('conf').value).toFixed(2)) + '</small>'
+              + (fp.length ? '<small class="fp">' + fp.join(' · ') + '</small>' : '');
 
   $('s-n').textContent     = j.n_defects;
   $('s-max').textContent   = j.max_score ? j.max_score.toFixed(3) : '–';
@@ -426,6 +437,18 @@ function render(j, opts){
   $('s-model').textContent = replay
     ? ((j.model_name || '—').replace(/^onnx:/, '') + (j.is_mock ? ' (Mock)' : ''))
     : (j.is_mock ? 'Mock' : j.model_name.replace(/^onnx:/,''));
+
+  // 「这条记录是哪版权重跑的」——文件名会复用（每次都叫 best.onnx），只能看内容摘要。
+  // 老记录没存过指纹，如实显示「未知」，绝不按日期猜一个出来。
+  if(replay){
+    const bits = [];
+    bits.push(j.model_sha ? 'sha ' + j.model_sha : 'sha 未知（老记录）');
+    if(j.imgsz)    bits.push(j.imgsz + ' 输入');
+    if(j.conf_thr != null) bits.push('阈值 ' + (+j.conf_thr).toFixed(2));
+    $('s-model').title = bits.join(' · ');
+  }else{
+    $('s-model').title = '本次检测用的模型';
+  }
 
   // 框 + 多边形轮廓
   const ov = $('overlay');
@@ -567,6 +590,13 @@ async function loadReport(){
     let note = '口径：<b>' + (since ? since + ' 起（本地时间）' : '全部历史')
              + '</b> · 模型 <b>' + (model || '全部') + '</b>'
              + ' · 已判定 <b>' + r.labeled + '</b> 条，共 ' + r.total_inspections + ' 条';
+    // 分母必须写出来。同样是「过杀率 0%」：
+    //   分母 9 条   → 这 9 条良品都没误判，能说；
+    //   分母 0 条   → 根本没法算，只能说「—」。
+    // 不写分母，这两种 0% 长得一模一样 —— 这就是当初误读「漏检 0%」的病根。
+    if(r.samples){
+      note += '（缺陷 <b>' + r.samples.positive + '</b> / 良品 <b>' + r.samples.negative + '</b>）';
+    }
     if(r.excluded_mock) note += ' · 已排除 Mock <b>' + r.excluded_mock + '</b> 条';
     if(r.total_inspections && !r.labeled){
       note += '<br>这个区间没有回填过真值的记录，漏检率算不出来（不是 0）。';

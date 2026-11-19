@@ -192,6 +192,11 @@ async def detect(
             max_score=float(max_score),
             latency_ms=latency_ms,
             items=items,
+            # 可追溯三件套：哪份权重、多大输入、什么阈值。
+            # 少任何一个，「这条记录能不能复现」都答不上来。
+            model_sha=getattr(det, "model_sha", None),
+            imgsz=getattr(det, "imgsz", None),
+            conf_thr=conf,
         )
     except Exception:
         # 图已经写进磁盘、库却没写成功 → 这会留下「孤儿文件」：
@@ -306,16 +311,26 @@ def backfill_gt() -> dict:
 
 
 @app.get("/report", tags=["统计"])
-def report(since: str | None = None, model: str | None = None) -> dict:
+def report(
+    since: str | None = None,
+    model: str | None = None,
+    model_sha: str | None = None,
+) -> dict:
     """混淆矩阵 + 漏检率/过杀率 + 节拍分位数 —— 产线要看的就是这几个数。
 
-    两个可选过滤，回答「这个成绩是谁的」：
+    三个可选过滤，回答「这个成绩是谁的」：
 
         /report                          全历史（默认）
         /report?since=2026-11-14         只要这天之后（按**本地时间**理解）
-        /report?model=onnx:best.onnx     只要这个模型跑的
+        /report?model=onnx:best.onnx     只要这个**文件名**跑的（会混版本！）
+        /report?model_sha=ab12cd34ef56   只要这**份权重内容**跑的（唯一可信）
 
-    为什么要这个：库里什么时期的记录都有。换模型前留着的失败样本
+    model 和 model_sha 的区别必须讲清楚：
+        文件名会复用 —— 每次训练导出的都叫 best.onnx，所以 ?model= 会把
+        v1~v4 四版权重的记录混在一起算。要判断「这个数字属于哪版权重」，
+        只能按内容摘要筛。老记录没有摘要（NULL），显示「未知」，不猜。
+
+    为什么要过滤：库里什么时期的记录都有。换模型前留着的失败样本
     会一直算在当前模型头上 —— 实测全历史漏检 19.39%，
     但只看当前模型上线后的记录是 0%。数字必须带口径才有意义。
     """
@@ -328,4 +343,6 @@ def report(since: str | None = None, model: str | None = None) -> dict:
                 status_code=400,
                 detail="since 格式不对，用 2026-11-14 或 2026-11-14T08:00:00",
             ) from None
-    return db.report_summary(since=since_dt, model=model or None)
+    return db.report_summary(
+        since=since_dt, model=model or None, model_sha=model_sha or None
+    )
