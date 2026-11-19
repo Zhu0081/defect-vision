@@ -28,6 +28,10 @@ class DefectItem(BaseModel):
         default_factory=list,
         description="归一化的缺陷轮廓 [[x, y], ...]；检测框模型返回空数组",
     )
+    polygons: list[list[list[float]]] = Field(
+        default_factory=list,
+        description="同一块框里的全部轮廓（断续划痕拆成多段时用）；polygon 恒等于第一段",
+    )
 
 
 class DetectResponse(BaseModel):
@@ -65,6 +69,9 @@ class RecordItem(BaseModel):
     # 老数据没有轮廓，统一返回 []（库里是 NULL）
     polygon: list[list[float]] = Field(default_factory=list,
                                        description="归一化多边形顶点，没有就是 []")
+    polygons: list[list[list[float]]] = Field(
+        default_factory=list,
+        description="同一块框里的全部轮廓；没有就是 []。polygon 恒等于第一段")
 
 
 class RecordOut(BaseModel):

@@ -366,22 +366,42 @@ namespace DefectVision.UI
                         float x2 = (float)box[2].GetDouble() * src.Width;
                         float y2 = (float)box[3].GetDouble() * src.Height;
 
-                        // 轮廓：多边形点集直接按比例换算
-                        if (it.TryGetProperty("polygon", out JsonElement poly) &&
-                            poly.ValueKind == JsonValueKind.Array && poly.GetArrayLength() >= 3)
+                        // 轮廓：断续划痕会拆成多段，优先画 polygons（数组的数组），
+                        // 老数据没有 polygons 就退回单段 polygon。
+                        // 两段都画，才不会把真实范围画短。
+                        bool drew = false;
+                        if (it.TryGetProperty("polygons", out JsonElement polys) &&
+                            polys.ValueKind == JsonValueKind.Array && polys.GetArrayLength() > 0)
+                        {
+                            foreach (JsonElement ring in polys.EnumerateArray())
+                            {
+                                if (ring.ValueKind != JsonValueKind.Array || ring.GetArrayLength() < 3)
+                                    continue;
+                                PointF[] pts = new PointF[ring.GetArrayLength()];
+                                for (int i = 0; i < pts.Length; i++)
+                                    pts[i] = new PointF(
+                                        (float)ring[i][0].GetDouble() * src.Width,
+                                        (float)ring[i][1].GetDouble() * src.Height);
+                                g.FillPolygon(fill, pts);
+                                g.DrawPolygon(edge, pts);
+                                drew = true;
+                            }
+                        }
+                        else if (it.TryGetProperty("polygon", out JsonElement poly) &&
+                                 poly.ValueKind == JsonValueKind.Array && poly.GetArrayLength() >= 3)
                         {
                             PointF[] pts = new PointF[poly.GetArrayLength()];
                             for (int i = 0; i < pts.Length; i++)
-                            {
                                 pts[i] = new PointF(
                                     (float)poly[i][0].GetDouble() * src.Width,
                                     (float)poly[i][1].GetDouble() * src.Height);
-                            }
                             g.FillPolygon(fill, pts);
                             g.DrawPolygon(edge, pts);
+                            drew = true;
                         }
-                        else
+                        if (!drew)
                         {
+                            // 没有轮廓（老记录或检测框模型）就画框，不能什么都不画
                             g.DrawRectangle(boxPen, x1, y1, x2 - x1, y2 - y1);
                         }
 
@@ -523,11 +543,28 @@ namespace DefectVision.UI
                 {
                     _original = new Bitmap(img);
                 }
-                SwapImage(_original);
+
+                // 关键：历史记录**读库里存好的框和轮廓**，不重新调用 /detect。
+                // 以前这里是 SwapImage(_original) 只显示原图；再早的版本更糟 ——
+                // 把图重新 POST 一遍 /detect，等于重跑模型、还多存一条记录，
+                // 显示的就不是"你当时看到的那次判断"了。
+                string recJson = await Http.GetStringAsync(BaseUrl + "/records/" + idText);
+                using (JsonDocument rec = JsonDocument.Parse(recJson))
+                {
+                    JsonElement root = rec.RootElement;
+                    SwapImage(DrawResult(_original, root));
+
+                    int n = root.TryGetProperty("n_defects", out JsonElement ne) ? ne.GetInt32() : 0;
+                    bool hasItems = root.TryGetProperty("items", out JsonElement its) &&
+                                    its.ValueKind == JsonValueKind.Array && its.GetArrayLength() > 0;
+                    if (!hasItems && n > 0)
+                        lblResult.Text = "历史记录：这条没有存缺陷明细（老数据），只能看图";
+                    else
+                        lblResult.Text = string.Format("历史记录：{0} 处缺陷（读数据库，未重新推理）", n);
+                }
                 lblStatus.Text = "正在查看历史记录 " + text;
                 lblStatus.ForeColor = Color.FromArgb(60, 60, 60);
-                lblResult.Text = "这是历史记录里的原图（不含框）";
-                lblResult.ForeColor = Color.Gray;
+                lblResult.ForeColor = Color.Crimson;
                 _currentPath = null;
             }
             catch (Exception ex)

@@ -47,6 +47,8 @@ class Detection:
     box: tuple[float, float, float, float]
     # 归一化到原图 [0,1] 的多边形轮廓（分割模型才有；检测框模型为 None）
     polygon: tuple[tuple[float, float], ...] | None = None
+    # 同一块框里的全部轮廓（断续划痕会拆成多段）。polygon 恒等于 polygons[0]。
+    polygons: tuple[tuple[tuple[float, float], ...], ...] | None = None
 
 
 class BaseDetector:
@@ -218,7 +220,7 @@ class OnnxDetector(BaseDetector):
             if ox2 <= ox1 or oy2 <= oy1:
                 continue
             idx = int(cls[k])
-            poly = (
+            rings = (
                 self._decode_mask(coefs[j], protos, (x1[j], y1[j], x2[j], y2[j]),
                                   left, top, r, w, h)
                 if coefs is not None else None
@@ -228,7 +230,8 @@ class OnnxDetector(BaseDetector):
                     label=LABELS[idx] if 0 <= idx < len(LABELS) else f"cls{idx}",
                     score=round(float(score[k]), 3),
                     box=(round(ox1, 4), round(oy1, 4), round(ox2, 4), round(oy2, 4)),
-                    polygon=poly,
+                    polygon=rings[0] if rings else None,
+                    polygons=tuple(rings) if rings else None,
                 )
             )
         return out
@@ -261,8 +264,11 @@ class OnnxDetector(BaseDetector):
                      box_canvas: tuple[float, float, float, float],
                      left: int, top: int, r: float, w: int, h: int,
                      thr: float = 0.25, min_area: int = 12
-                     ) -> tuple[tuple[float, float], ...] | None:
+                     ) -> list[tuple[tuple[float, float], ...]]:
         """32 个系数 × 32 张 mask 原型 → 一张轮廓图 → 简化成多边形。
+
+        返回**多段**（按面积从大到小）。断续的划痕会被膨胀切成好几段，
+        只取最大那段会把真实范围画短；第一段仍然当 `polygon` 用，兼容老数据。
 
         两个必须做的裁剪（少一步都会画歪）：
         ① 先把内容区（去掉 letterbox 灰边）裁出来；
@@ -294,7 +300,7 @@ class OnnxDetector(BaseDetector):
         bx2 = min(crop.shape[1], int(round(box_canvas[2] / scale)) - mx1)
         by2 = min(crop.shape[0], int(round(box_canvas[3] / scale)) - my1)
         if bx2 - bx1 < 2 or by2 - by1 < 2:
-            return None
+            return []
         inside = np.zeros_like(crop)
         inside[by1:by2, bx1:bx2] = crop[by1:by2, bx1:bx2]
         crop = inside
@@ -309,25 +315,35 @@ class OnnxDetector(BaseDetector):
         # 再膨胀两个上采样像素（约 3 个原图像素），把断开的笔画粘起来
         binary = cv2.dilate(binary, np.ones((3, 3), np.uint8), iterations=1)
         if int(binary.sum()) < min_area * UP * UP // 8:
-            return None
+            return []
 
         contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         if not contours:
-            return None
-        biggest = max(contours, key=cv2.contourArea)
-        eps = 0.002 * cv2.arcLength(biggest, True)
-        approx = cv2.approxPolyDP(biggest, eps, True).reshape(-1, 2).astype(np.float32)
-        if approx.shape[0] < 3:
-            return None
+            return []
+        # 断续的划痕会被膨胀切成一串小段。只取最大那段 → 低估真实范围；
+        # 所以这里按面积从大到小保留所有「够大」的段（≥ 最大段的 30%），
+        # 第一段仍然作为 polygon 返回（老字段、老数据都能读），全部段放进 polygons。
+        areas = sorted((cv2.contourArea(c) for c in contours), reverse=True)
+        keep_min = max(areas[0] * 0.30, float(min_area) * UP * UP / 8.0)
+        rings: list[tuple[tuple[float, float], ...]] = []
+        for c in sorted(contours, key=cv2.contourArea, reverse=True):
+            if cv2.contourArea(c) < keep_min:
+                continue
+            eps = 0.002 * cv2.arcLength(c, True)
+            approx = cv2.approxPolyDP(c, eps, True).reshape(-1, 2).astype(np.float32)
+            if approx.shape[0] < 3:
+                continue
 
-        # 轮廓点（上采样网格）→ 原型网格 → 画布像素 → 原图像素 → 归一化
-        approx[:, 0] = (approx[:, 0] / UP + mx1) * scale
-        approx[:, 1] = (approx[:, 1] / UP + my1) * scale
-        approx[:, 0] = (approx[:, 0] - left) / r / w
-        approx[:, 1] = (approx[:, 1] - top) / r / h
-        approx[:, 0] = np.clip(approx[:, 0], 0.0, 1.0)
-        approx[:, 1] = np.clip(approx[:, 1], 0.0, 1.0)
-        return tuple((round(float(px), 4), round(float(py), 4)) for px, py in approx)
+            # 轮廓点（上采样网格）→ 原型网格 → 画布像素 → 原图像素 → 归一化
+            approx[:, 0] = (approx[:, 0] / UP + mx1) * scale
+            approx[:, 1] = (approx[:, 1] / UP + my1) * scale
+            approx[:, 0] = (approx[:, 0] - left) / r / w
+            approx[:, 1] = (approx[:, 1] - top) / r / h
+            approx[:, 0] = np.clip(approx[:, 0], 0.0, 1.0)
+            approx[:, 1] = np.clip(approx[:, 1], 0.0, 1.0)
+            rings.append(tuple((round(float(px), 4), round(float(py), 4))
+                               for px, py in approx))
+        return rings
 
     def _decode_mask_unused(self, coef: np.ndarray, proto: np.ndarray,
                             left: int, top: int, r: float, w: int, h: int,
@@ -362,19 +378,45 @@ class OnnxDetector(BaseDetector):
         return tuple((round(float(px), 4), round(float(py), 4)) for px, py in approx)
 
 
+def _mock_allowed() -> bool:
+    """是否允许在模型加载失败时退回假模型。
+
+    默认 **不允许**。原因：假模型返回的是编造的结果，界面上只多一行小字，
+    产线上没人会注意到「今天所有件都判成 NG」其实是模型没加载上。
+    想看演示 / 跑测试，显式设 `DV_ALLOW_MOCK=1`；生产环境不设这个变量。
+
+    口径统一在 config.ALLOW_MOCK，这里只做一层兜底（detector 也允许脱离
+    config 单独用，比如脚本里直接 import）。
+    """
+    try:
+        from . import config
+        return bool(config.ALLOW_MOCK)
+    except Exception:
+        return os.getenv("DV_ALLOW_MOCK", "0").strip().lower() in {"1", "true", "yes", "on"}
+
+
 def build_detector(model_path: Path, conf: float = 0.25,
                    imgsz: int = int(os.getenv("DV_IMGSZ", "1280"))) -> BaseDetector:
-    """优先用真模型；条件不满足就退回 Mock，并在控制台说清楚为什么。"""
+    """加载真模型。加载不上时：默认**直接抛错退出**，只有显式允许才退回 Mock。"""
+
+    def _fallback(reason: str) -> BaseDetector:
+        if _mock_allowed():
+            print(f"[detector] {reason} → 已按 DV_ALLOW_MOCK=1 退回 MockDetector（结果是假的）")
+            return MockDetector(conf=conf)
+        raise RuntimeError(
+            f"[detector] 模型不可用：{reason}\n"
+            f"  生产模式不允许静默降级成假模型，服务直接退出。\n"
+            f"  只做演示/测试：设环境变量 DV_ALLOW_MOCK=1\n"
+            f"  真要检测：确认 {model_path} 存在，且 pip install onnxruntime"
+        )
+
     if not Path(model_path).exists():
-        print(f"[detector] 没找到模型 {model_path}，先用 MockDetector（结果是假的）")
-        return MockDetector(conf=conf)
+        return _fallback(f"找不到模型文件 {model_path}")
     try:
         det = OnnxDetector(model_path, conf=conf)
-        print(f"[detector] 已加载 {model_path.name}")
+        print(f"[detector] 已加载 {model_path.name}（sha {det.model_sha}）")
         return det
     except ImportError:
-        print("[detector] 没装 onnxruntime，先用 MockDetector。装：pip install onnxruntime")
-        return MockDetector(conf=conf)
+        return _fallback("没装 onnxruntime（pip install onnxruntime）")
     except Exception as exc:  # 模型损坏、opset 不兼容等
-        print(f"[detector] 加载失败（{exc}），回退 MockDetector")
-        return MockDetector(conf=conf)
+        return _fallback(f"加载失败：{exc}")

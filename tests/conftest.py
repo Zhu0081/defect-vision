@@ -3,8 +3,10 @@
 
 三件事在**导入 app 之前**做完，顺序不能反：
     1. 把数据目录/上传目录/数据库都指到临时目录 —— 测试绝不能写脏你的真数据
-    2. 把模型路径指到一个不存在的文件 —— 没有模型时服务会自动退回 MockDetector，
-       测试因此不依赖 models/best.onnx（别人 clone 下来也能直接跑）
+    2. 把模型路径指到一个不存在的文件，**并显式允许 Mock**——
+       生产模式下模型加载失败会直接抛错退出（这是刻意的，见 detector._fallback），
+       测试要的是「没有模型也能跑」，所以必须设 DV_ALLOW_MOCK=1。
+       不设这一行，19 个用例会在 lifespan 里全部报 RuntimeError。
     3. 把上传上限调到 1 MB —— 测 413 时不用真造一个 16 MB 的文件
 
 注意：config.py 在 import 时就读取这些环境变量，
@@ -27,6 +29,8 @@ os.environ["DV_DATA_DIR"] = str(_TMP / "data")
 os.environ["DV_UPLOAD_DIR"] = str(_TMP / "data" / "uploads")
 os.environ["DV_DATABASE_URL"] = f"sqlite:///{(_TMP / 'data' / 'test.db').as_posix()}"
 os.environ["DV_MODEL_PATH"] = str(_TMP / "models" / "does-not-exist.onnx")
+# 测试环境必须允许 Mock，否则 build_detector 会按生产模式直接抛错（见 conftest 顶部说明）
+os.environ["DV_ALLOW_MOCK"] = "1"
 os.environ["DV_MAX_UPLOAD_MB"] = "1"
 # 强制清空大模型 key：测试绝不能真的去调外部接口（慢、要钱、还不稳定）。
 # 清空后 AI 报告会自动走规则模板，正好测「降级通道」。

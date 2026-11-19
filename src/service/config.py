@@ -34,6 +34,17 @@ MAX_UPLOAD_MB = int(os.getenv("DV_MAX_UPLOAD_MB", "16"))
 # 阈值：低于它的框直接丢掉（后续按产线要求再调）
 DEFAULT_CONF = float(os.getenv("DV_DEFAULT_CONF", "0.25"))
 
+# ---------- 安全开关 ----------
+# DV_ALLOW_MOCK=1 时，模型加载失败才允许退回假模型；不设（默认）就直接报错退出。
+# 理由：假模型返回的是编造结果，界面上只多一行小字，产线上没人会注意到
+# 「今天所有件都判成 NG」其实是模型没加载上。
+ALLOW_MOCK = os.getenv("DV_ALLOW_MOCK", "0").strip() in ("1", "true", "True", "yes")
+
+# DV_API_TOKEN 为空（默认）= 不做认证，本机/局域网演示直接用；
+# 设了值以后，所有**会改数据**的接口（上传检测、生成报告、维护脚本）都要求
+# 请求头 `X-API-Token` 与它一致，否则 401。查询类接口不拦，方便演示时直接看页面。
+API_TOKEN = os.getenv("DV_API_TOKEN", "").strip()
+
 # ---------- 大模型（AI 检测报告）----------
 # 走 OpenAI 兼容协议：DeepSeek / 通义 / 智谱 / 月之暗面 / 本地 vLLM / Ollama 都是这个格式。
 # 换服务商只改 base_url 和 model 两个环境变量，代码一行不动 —— 这就是「配置外置」的意义。

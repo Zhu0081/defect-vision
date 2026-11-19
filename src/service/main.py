@@ -27,7 +27,8 @@ from pathlib import Path
 
 import cv2
 import numpy as np
-from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi import (Depends, FastAPI, File, Form, Header, HTTPException, Request,
+                     UploadFile)
 from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
@@ -95,7 +96,26 @@ def health() -> schemas.HealthResponse:
     )
 
 
-@app.post("/detect", response_model=schemas.DetectResponse)
+def require_token(x_api_token: str | None = Header(default=None)) -> None:
+    """会改数据的接口的令牌校验。
+
+    `DV_API_TOKEN` 没设（默认）= 不校验，本机演示直接用；
+    设了值以后必须带 `X-API-Token: <值>`，否则 401。
+
+    为什么只拦"会改数据"的接口：演示时面试官要能直接打开页面看历史、看统计，
+    如果连查询都要 token，现场演示会变成"先翻环境变量"。
+    """
+    if not config.API_TOKEN:
+        return
+    if (x_api_token or "").strip() != config.API_TOKEN:
+        raise HTTPException(
+            status_code=401,
+            detail="缺少或错误的 X-API-Token（服务端设置了 DV_API_TOKEN）",
+        )
+
+
+@app.post("/detect", response_model=schemas.DetectResponse,
+          dependencies=[Depends(require_token)])
 async def detect(
     request: Request,
     file: UploadFile = File(..., description="待检测图像（jpg/png）"),
@@ -160,7 +180,10 @@ async def detect(
     items = [
         {"label": d.label, "score": d.score, "x1": d.box[0], "y1": d.box[1],
          "x2": d.box[2], "y2": d.box[3],
-         "polygon": [list(p) for p in d.polygon] if d.polygon else []}
+         "polygon": [list(p) for p in d.polygon] if d.polygon else [],
+         # 断续划痕会拆成多段：polygon 只给最大那段（兼容老字段），polygons 给全部
+         "polygons": [[list(p) for p in ring] for ring in (d.polygons or ())]
+         if d.polygon else []}
         for d in detections
     ]
     verdict = "ng" if items else "ok"
@@ -222,7 +245,8 @@ async def detect(
         items=[
             schemas.DefectItem(label=i["label"], score=i["score"],
                                box=[i["x1"], i["y1"], i["x2"], i["y2"]],
-                               polygon=i.get("polygon") or [])
+                               polygon=i.get("polygon") or [],
+                               polygons=i.get("polygons") or [])
             for i in items
         ],
         image_url=f"/image/{iid}",
@@ -243,7 +267,8 @@ def get_record(iid: int) -> dict:
     return row
 
 
-@app.post("/records/{iid}/report", response_model=schemas.AiReportOut, tags=["AI"])
+@app.post("/records/{iid}/report", response_model=schemas.AiReportOut, tags=["AI"],
+          dependencies=[Depends(require_token)])
 async def make_ai_report(iid: int, force: bool = False) -> schemas.AiReportOut:
     """给一次检测生成中文报告。
 
@@ -304,7 +329,8 @@ def stats() -> list[dict]:
     return db.stats_by_light()
 
 
-@app.post("/maintenance/backfill-gt", tags=["维护"])
+@app.post("/maintenance/backfill-gt", tags=["维护"],
+          dependencies=[Depends(require_token)])
 def backfill_gt() -> dict:
     """按文件名把真值补进 gt_verdict。幂等：重复调用不会覆盖已经填过的行。"""
     return db.backfill_gt()

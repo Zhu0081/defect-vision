@@ -247,6 +247,114 @@ def test_defect_polygon_roundtrip(client):
     assert any(r[0] and r[0].lstrip().startswith("[[") for r in raw)
 
 
+def test_defect_polygons_roundtrip(client):
+    """多段轮廓：一个框里有两段（断续划痕），两段都要能存能取。
+
+    为什么要这个字段：以前只保留最大连通域，断续的划痕只画到最长那一段，
+    面积被低估、界面上看着"没画全"。polygons 存全部段，polygon 恒等于第一段。
+    """
+    from src.service import db
+
+    seg1 = [[0.10, 0.10], [0.30, 0.10], [0.30, 0.12], [0.10, 0.12]]
+    seg2 = [[0.40, 0.10], [0.60, 0.10], [0.60, 0.12], [0.40, 0.12]]
+    iid = db.save_inspection(
+        batch_id="B_POLYS_TEST",
+        filename="card_p001_scratch_002.jpg",
+        image_path="x.jpg",
+        part_id="001",
+        light="side",
+        model_name="test",
+        is_mock=False,
+        verdict="ng",
+        n_defects=1,
+        max_score=0.9,
+        latency_ms=11.0,
+        items=[{
+            "label": "scratch", "score": 0.9,
+            "x1": 0.10, "y1": 0.10, "x2": 0.60, "y2": 0.12,
+            "polygon": seg1,
+            "polygons": [seg1, seg2],
+        }],
+    )
+
+    it = client.get(f"/records/{iid}").json()["items"][0]
+    assert it["polygon"] == seg1          # 老字段仍然等于第一段
+    assert it["polygons"] == [seg1, seg2]  # 新字段给出全部段
+    assert len(it["polygons"]) == 2
+
+
+def test_old_record_polygons_falls_back(client):
+    """老数据只有 polygon、没有 polygons 时，接口要把 polygons 补成 [polygon]。
+
+    否则前端要写两套逻辑（有 polygons 用 polygons，没有就退回 polygon），
+    一条返回格式的差异就能让历史记录少画一段。
+    """
+    from src.service import db
+
+    seg = [[0.1, 0.1], [0.3, 0.1], [0.3, 0.3], [0.1, 0.3]]
+    iid = db.save_inspection(
+        batch_id="B_OLD_TEST",
+        filename="card_p002_scratch_001.jpg",
+        image_path="x.jpg",
+        part_id="002",
+        light="side",
+        model_name="test",
+        is_mock=False,
+        verdict="ng",
+        n_defects=1,
+        max_score=0.8,
+        latency_ms=10.0,
+        # 故意不传 polygons，模拟落库前的老记录
+        items=[{"label": "scratch", "score": 0.8,
+                "x1": 0.1, "y1": 0.1, "x2": 0.3, "y2": 0.3,
+                "polygon": seg}],
+    )
+
+    it = client.get(f"/records/{iid}").json()["items"][0]
+    assert it["polygon"] == seg
+    assert it["polygons"] == [seg]
+
+
+def test_production_raises_when_model_missing(monkeypatch):
+    """生产模式（不设 DV_ALLOW_MOCK）下，模型加载失败必须**直接报错**，不许静默变 Mock。
+
+    这是这次修的核心：以前模型坏了页面照样出结果，只是角落多一行小字，
+    产线上没人会发现"今天所有件都判成 NG"其实是模型没加载上。
+    """
+    import pytest as _pytest
+
+    from src.service import config, detector
+
+    # config.ALLOW_MOCK 在 import 时就定了值（测试环境设为 True），
+    # 所以这里不能只删环境变量，必须把 config 上的值也改掉。
+    monkeypatch.setattr(config, "ALLOW_MOCK", False)
+    monkeypatch.delenv("DV_ALLOW_MOCK", raising=False)
+    with _pytest.raises(RuntimeError) as ei:
+        detector.build_detector("definitely-not-here.onnx")
+    msg = str(ei.value)
+    assert "模型不可用" in msg
+    assert "DV_ALLOW_MOCK=1" in msg      # 报错信息里要给出逃生口
+    assert "不允许静默降级" in msg
+
+
+def test_api_token_required_only_when_configured(monkeypatch, client):
+    """DV_API_TOKEN 设了以后，会改数据的接口必须带 X-API-Token；查询接口不拦。"""
+    from src.service import config
+
+    # 没设 token（默认）→ 不带头也能查统计
+    monkeypatch.setattr(config, "API_TOKEN", "")
+    assert client.get("/stats").status_code == 200
+
+    # 设了 token → 不带头 401，带对了 200；查询类仍然 200（演示要能直接看页面）
+    monkeypatch.setattr(config, "API_TOKEN", "s3cret")
+    r = client.post("/maintenance/backfill-gt")
+    assert r.status_code == 401
+    assert "X-API-Token" in r.json()["detail"]
+    assert client.get("/stats").status_code == 200
+    ok = client.post("/maintenance/backfill-gt", headers={"X-API-Token": "s3cret"})
+    assert ok.status_code == 200
+
+
 def test_report_carries_its_scope(client):
     """统计必须把口径一起返回。
 

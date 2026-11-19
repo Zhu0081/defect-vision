@@ -466,12 +466,17 @@ function render(j, opts){
   ov.appendChild(svg);
 
   j.items.forEach(d => {
-    if (d.polygon && d.polygon.length >= 3) {
+    // 断续划痕会解出多段轮廓：优先画 polygons（数组的数组），
+    // 老数据没有 polygons 就退回单段 polygon。两段都画才不会把真实范围画短。
+    const rings = (d.polygons && d.polygons.length) ? d.polygons
+                : (d.polygon && d.polygon.length) ? [d.polygon] : [];
+    rings.forEach(ring => {
+      if (!ring || ring.length < 3) return;
       const pg = document.createElementNS(NS, 'polygon');
-      pg.setAttribute('points', d.polygon.map(p =>
+      pg.setAttribute('points', ring.map(p =>
         (p[0] * S).toFixed(1) + ',' + (p[1] * S).toFixed(1)).join(' '));
       svg.appendChild(pg);
-    }
+    });
 
     const [x1,y1,x2,y2] = d.box;
     const el = document.createElement('div');

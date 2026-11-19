@@ -118,6 +118,8 @@ MIGRATIONS: list[tuple[str, str, str]] = [
     # 轮廓点数不固定（本项目 20~30 点），拆表要么一行多点、要么多行拼装，
     # 两种都比"一整段 JSON 跟着这条缺陷一起读"更麻烦。TEXT 在两端都能存。
     ("defect_item", "polygon", "polygon TEXT"),
+    # 断续划痕会解出多段轮廓；只存一段会画短。老数据这一列为 NULL，读时回退成 [polygon]。
+    ("defect_item", "polygons", "polygons TEXT"),
     # 模型指纹与推理参数。为什么非加不可：
     # 111 条历史记录里 model_name 只有 1 个值（onnx:best.onnx），但这 111 条
     # 横跨 20 天、中间换过 v1~v4 四版权重 —— 光看名字根本分不清哪条是哪个模型跑的。
@@ -222,8 +224,8 @@ def save_inspection(
                 text(
                     """
                     INSERT INTO defect_item
-                        (inspection_id, label, score, x1, y1, x2, y2, polygon)
-                    VALUES (:iid, :label, :score, :x1, :y1, :x2, :y2, :polygon)
+                        (inspection_id, label, score, x1, y1, x2, y2, polygon, polygons)
+                    VALUES (:iid, :label, :score, :x1, :y1, :x2, :y2, :polygon, :polygons)
                     """
                 ),
                 [
@@ -238,6 +240,11 @@ def save_inspection(
                         # 没有轮廓就存 NULL，不要存 "[]" —— 空数组和下过轮廓是两件事
                         "polygon": json.dumps(it["polygon"], ensure_ascii=False)
                         if it.get("polygon")
+                        else None,
+                        # 多段轮廓（断续划痕）：只存多段本身，老数据这一列为 NULL，
+                        # 读的时候回退成 [polygon]，所以不做数据回填也不会丢信息。
+                        "polygons": json.dumps(it["polygons"], ensure_ascii=False)
+                        if it.get("polygons")
                         else None,
                     }
                     for it in items
@@ -274,7 +281,7 @@ def get_inspection(iid: int) -> dict | None:
         items = conn.execute(
             text(
                 """
-                SELECT label, score, x1, y1, x2, y2, polygon
+                SELECT label, score, x1, y1, x2, y2, polygon, polygons
                 FROM defect_item
                 WHERE inspection_id = :iid
                 ORDER BY score DESC
@@ -288,10 +295,12 @@ def get_inspection(iid: int) -> dict | None:
 
 
 def _item_row(r) -> dict:
-    """把 defect_item 的一行转成接口要的形状：polygon 从 JSON 文本还原成列表。
+    """把 defect_item 的一行转成接口要的形状：polygon / polygons 从 JSON 文本还原。
 
     库里用 NULL 表示「这条记录没存过轮廓」（老数据都是这样），
     接口对外统一成 []，前端和 C# 就不用区分 null 和空数组。
+    polygons 为 NULL 时回退成 `[polygon]`（老数据只存了一段）——
+    这样上层永远只看 polygons 也能画对，不用管新旧格式。
     """
     d = dict(r)
     # 接口和前端都用 box 这个四元组；库里拆成四列是为了能按坐标查/建索引
@@ -306,6 +315,17 @@ def _item_row(r) -> dict:
             d["polygon"] = []
     else:
         d["polygon"] = []
+
+    raw_multi = d.get("polygons")
+    if raw_multi:
+        try:
+            d["polygons"] = json.loads(raw_multi)
+        except (TypeError, ValueError):
+            d["polygons"] = []
+    else:
+        d["polygons"] = []
+    if not d["polygons"] and d["polygon"]:
+        d["polygons"] = [d["polygon"]]
     return d
 
 

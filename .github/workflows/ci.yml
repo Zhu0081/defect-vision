@@ -1,0 +1,52 @@
+name: CI
+
+# 每次推送到 main / 提 PR 都跑一遍：
+#   ① 单元测试（SQLite + Mock 模型，不下载任何权重）
+#   ② 前端单文件页的 JS 语法（页面里 <script> 是一整块，改坏了整页白屏）
+#   ③ Python 文件的语法编译（比跑起来才发现少个括号强）
+#
+# 注意：这里**故意不装 torch / ultralytics / onnxruntime**。
+# 测试走 Mock 和 SQLite，装了只会让 CI 慢十倍，测的东西却没变多。
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: 安装依赖
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: 跑单元测试
+        run: python -m pytest tests -q
+
+      - name: Python 语法编译
+        run: python -m compileall -q src scripts
+
+      - name: 前端 JS 语法
+        run: |
+          python - <<'PY'
+          import pathlib, re, sys
+          html = pathlib.Path("src/service/static/index.html").read_text(encoding="utf-8")
+          m = re.search(r"<script>(.*)</script>", html, re.S)
+          if not m:
+              sys.exit("index.html 里没找到 <script> 块")
+          pathlib.Path("inline.js").write_text(m.group(1), encoding="utf-8")
+          print("已提取 inline.js，共", len(m.group(1)), "字符")
+          PY
+          node --check inline.js
