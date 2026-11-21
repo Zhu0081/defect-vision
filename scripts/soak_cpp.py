@@ -116,6 +116,28 @@ def report(path: Path) -> int:
     print(f"时间范围：{rows[0]['ts']} → {rows[-1]['ts']}")
     print(f"总轮数：{len(rows)}   成功：{len(ok)}   失败：{len(bad)}   "
           f"失败率：{len(bad) / len(rows) * 100:.2f}%")
+
+    # 压测最容易被糊弄的地方：文件里 24 小时的时间跨度，不等于真的跑了 24 小时。
+    # 中间休眠/关机/手动停了，报告照样"看起来很长"。所以把空档算出来。
+    gaps = []
+    for a, b in zip(rows, rows[1:]):
+        try:
+            gap = (datetime.fromisoformat(b["ts"]) - datetime.fromisoformat(a["ts"])).total_seconds()
+        except (ValueError, KeyError):
+            continue
+        if gap > 120:            # 超过 2 分钟就算空档（正常间隔是 --interval 秒级）
+            gaps.append((a["ts"], b["ts"], gap))
+    if gaps:
+        longest = max(g[2] for g in gaps)
+        total_gap = sum(g[2] for g in gaps)
+        print(f"⚠ 空档 {len(gaps)} 处，累计 {total_gap / 3600:.2f} 小时，"
+              f"最长 {longest / 3600:.2f} 小时")
+        for s, e, g in sorted(gaps, key=lambda x: -x[2])[:3]:
+            print(f"    {s} → {e}（{g / 3600:.2f} 小时）")
+        print("  空档期间没有在压测 —— 这几十个小时不能算进稳定性结论。")
+    else:
+        print("空档：无（时间跨度是连贯的）")
+
     print(f"耗时 ms：p50 {pct(.5):.1f} / p95 {pct(.95):.1f} / max {ms[-1]:.1f}")
     if bad:
         print("失败样本（最多 5 条）：")
