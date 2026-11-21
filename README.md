@@ -138,6 +138,9 @@ python -m uvicorn src.service.main:app --port 8000
 
 打开 **http://127.0.0.1:8000/**
 
+> ⚠ **没有 `models/best.onnx` 会直接启动失败**（这是刻意的，见下节「安全与运维开关」）。
+> 只想看界面、不跑真模型：先设 `$env:DV_ALLOW_MOCK="1"`。
+
 ### 跑测试
 
 ```powershell
@@ -145,8 +148,10 @@ python -m pip install -r requirements-dev.txt
 python -m pytest tests -q
 ```
 
-9 个用例，覆盖健康检查、页面、空文件 / 非图片 / 超大文件三种拒绝路径、落库后能查回来、404。
-**不依赖真模型**（没有 `models/best.onnx` 时自动退回 MockDetector），也不写脏你的真实数据
+**23 个用例**，覆盖健康检查、页面、空文件 / 非图片 / 超大文件三种拒绝路径、落库后能查回来、
+轮廓与多段轮廓往返、老数据回退、统计分母、模型指纹、令牌校验、404。
+
+**不依赖真模型**（测试夹具显式设了 `DV_ALLOW_MOCK=1`），也不写脏你的真实数据
 （测试自己建临时目录和临时 SQLite）。
 
 ### 验证没吹牛
@@ -161,8 +166,35 @@ curl -X POST -F "file=@data/yolo/images/val/card_p004_scratch_001.jpg" http://12
 # 3. 复现训练
 python src/train/train.py --epochs 30 --imgsz 640 --batch 4 --name baseline_v1
 
-# 4. 复现阈值扫描
+# 4. 复现阈值扫描（默认只扫 val，别把 test 加进来）
 python src/eval/threshold_sweep.py
+```
+
+---
+
+## 安全与运维开关
+
+全部是环境变量，代码里不写死 —— 「改配置不改代码」是 JD 里反复出现的一条。
+
+| 变量 | 默认 | 作用 |
+|---|---|---|
+| `DV_ALLOW_MOCK` | **关** | 关着时：模型文件缺失 / 没装 onnxruntime / 加载异常 → **服务直接退出**。开着时才退回假模型（界面上会标 「Mock」） |
+| `DV_API_TOKEN` | 空（不校验） | 设了以后，`/detect`、`/records/{id}/report`、`/maintenance/*` 必须带 `X-API-Token`；**查询接口不拦**（演示要能直接看页面） |
+| `DV_DEFAULT_CONF` | `0.25` | 默认置信度阈值 |
+| `DV_MAX_UPLOAD_MB` | `16` | 单张上传上限 |
+
+为什么模型加载失败要**直接退出**而不是降级：
+
+```
+假模型返回的是编造结果，界面上只多一行小字。
+产线上没人会注意到「今天所有件都判成 NG」其实是模型根本没加载上。
+```
+
+上传目录只增不减，但没有自动删除策略（删了历史记录就只剩文字没有图）。手动清理：
+
+```powershell
+python scripts/purge_uploads.py          # 预演：只打印会删什么
+python scripts/purge_uploads.py --apply  # 真删（只删库里查不到的孤儿文件）
 ```
 
 ---
@@ -196,7 +228,7 @@ defect-vision/
 │   └── csharp/DefectVision.UI/  # WinForms 上位机：选图、检测、画轮廓、批量、历史
 ├── tests/
 │   ├── conftest.py              # 临时库 + 临时上传目录 + 强制 Mock 模型
-│   └── test_api.py              # 9 个接口回归用例
+│   └── test_api.py              # 23 个接口回归用例
 ├── data/yolo/data.yaml          # 数据集配置（由 prepare.py 生成）
 ├── docker-compose.yml           # 应用 + PostgreSQL 一键启动
 ├── Dockerfile
@@ -271,7 +303,9 @@ Docker Desktop 在 Windows 上走 9p/virtiofs 转发，小文件写入被放大�
 
 YOLO 默认 `conf=0.25` 是给通用目标检测的。工业场景必须扫出一条"阈值 vs 漏检率/过杀率"曲线，再由业务定阈值。
 
-脚本技巧：**推理只跑一次**。先按 `conf=0.01` 取出所有框，记下每张图的最大置信度；之后 19 个阈值只是拿这个分数比大小。42 张 × 19 = 798 次推理变成 42 次。
+脚本技巧：**推理只跑一次**。先按 `conf=0.01` 取出所有框，记下每张图的最大置信度；之后 19 个阈值只是拿这个分数比大小。25 张（val）× 19 = 475 次推理，变成 25 次。
+
+> 2026-11-17 审计发现：`--splits` 的默认值曾是 `val test`，等于**拿测试集调参**。现在默认只扫 `val`，`test` 只用来做一次独立验证（见 `tests` 与 `reports/threshold_sweep_v4_val.md` / `_v4_test.md`）。
 
 ### 6. 上传大小「边读边拦」，不是读完再判断
 
@@ -286,10 +320,13 @@ if len(raw) > LIMIT: raise 413
 
 ### 7. 有回归测试，且不依赖真模型
 
-`tests/` 下 9 个 pytest 用例，覆盖健康检查、页面、三种拒绝路径（空文件 / 非图片 / 超大）、落库后能查回来、404。
+`tests/` 下 **23** 个 pytest 用例，覆盖健康检查、页面、三种拒绝路径（空文件 / 非图片 / 超大）、
+落库后能查回来、轮廓与多段轮廓往返、老数据回退、统计分母、模型指纹、令牌校验、404。
 
 两个设计点：
-- **不依赖 `models/best.onnx`**：测试里把模型路径指到不存在的文件，服务自动退回 MockDetector —— 别人 clone 下来不用先下权重就能跑测试
+- **不依赖 `models/best.onnx`**：测试夹具把模型路径指到不存在的文件，并显式设 `DV_ALLOW_MOCK=1`
+  —— 别人 clone 下来不用先下权重就能跑测试。**注意这是显式开关，不是自动降级**：
+  生产模式下模型缺失会直接启动失败（见「安全与运维开关」）
 - **不写脏真实数据**：测试自己在临时目录建 SQLite 和上传目录
 
 写这批测试时抓到一个真 bug：`path.relative_to(BASE_DIR)` 在上传目录被指到项目外时会抛 `ValueError` → 500。这是纯靠读代码看不出来的。
@@ -355,6 +392,9 @@ curl -X POST http://127.0.0.1:8010/records/63/report
 | 运行时阈值只能往上调 | 导出时 `nms=True` 把 NMS 与 conf=0.25 焊进计算图，低于 0.25 的框出图时已不存在 | 需低阈值扫描时，另导一份不带 NMS 的 ONNX |
 | 前端是单文件 HTML | 不能多人协作 | Vue/React + 构建流程 |
 | 上位机只做了单机版 | 没有登录、没有多工位协作 | 加用户/工位概念，检测记录带 operator |
+| 2026-11-19 之前的历史记录没有轮廓 | 那些记录回放时只有框，画不出多边形（`polygons` 列为 NULL，读时回退成 `[polygon]`，而那时 `polygon` 也是空的） | 不回填、不猜；要看轮廓就重新检一遍 |
+| 上传目录没有自动清理 | 只提供手动脚本，且只删"库里查不到"的孤儿文件；有记录的图永不删 | 做归档：N 天前的图转缩略图 + 冷存储 |
+| CI 只跑 Mock + SQLite | GitHub Actions 里不装 torch/onnxruntime，抓不到「真模型 / 真 PostgreSQL」才有的问题（已经踩过两次：`round(double,int)`、`::numeric`） | 加一条 nightly job，用真镜像跑 `scripts/smoke_pg.py` |
 
 ### 量化踩过的坑（这个值得单独说）
 
